@@ -84,6 +84,7 @@ class NimHealthCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         port = _get_nim_port(self.config)
 
         if not host or not key_path:
@@ -91,7 +92,7 @@ class NimHealthCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             exit_code, stdout, _ = run_ssh_command(
                 ssh,
@@ -144,6 +145,7 @@ class NimInferenceCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         port = _get_nim_port(self.config)
         prompt = self.config.get("prompt", "What is CUDA?")
         max_tokens = self.config.get("max_tokens", 50)
@@ -154,7 +156,7 @@ class NimInferenceCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             # Auto-detect model name if not provided
             if not model:
@@ -269,6 +271,7 @@ class NimModelCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         port = _get_nim_port(self.config)
         expected_model = self.config.get("expected_model")
 
@@ -277,7 +280,7 @@ class NimModelCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             exit_code, stdout, stderr = run_ssh_command(ssh, f"curl -sf http://localhost:{port}/v1/models 2>/dev/null")
             if exit_code != 0 or not stdout.strip():

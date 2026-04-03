@@ -34,6 +34,7 @@ def get_ssh_client(
     host: str,
     user: str,
     key_path: str,
+    port: int = 22,
     timeout: int = 30,
 ) -> paramiko.SSHClient:
     """Create SSH client connection using paramiko.
@@ -42,6 +43,7 @@ def get_ssh_client(
         host: Hostname or IP address to connect to
         user: SSH username
         key_path: Path to SSH private key file
+        port: SSH port (default 22)
         timeout: Connection timeout in seconds
 
     Returns:
@@ -55,6 +57,7 @@ def get_ssh_client(
     ssh_client.connect(
         hostname=host,
         username=user,
+        port=port,
         key_filename=key_path,
         timeout=timeout,
         allow_agent=False,
@@ -135,10 +138,21 @@ def get_ssh_config(config: dict[str, Any], inventory: dict[str, Any]) -> dict[st
         or vmaas_inv.get("ssh_key_path")
     )
 
+    # Determine SSH port
+    port_raw = (
+        config.get("ssh_port")
+        or config.get("port")
+        or step_output.get("ssh_port")
+        or ssh_inv.get("port")
+        or vmaas_inv.get("ssh_port")
+    )
+    ssh_port = int(port_raw) if port_raw is not None else 22
+
     return {
         "ssh_host": host,
         "ssh_user": user,
         "ssh_key_path": key_path,
+        "ssh_port": ssh_port,
         # Optional metadata
         "gpu_count": config.get("expected_gpus") or vmaas_inv.get("gpu_count") or ssh_inv.get("gpu_count") or 0,
         "gpu_name": vmaas_inv.get("gpu_name") or ssh_inv.get("gpu_name"),

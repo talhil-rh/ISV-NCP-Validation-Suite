@@ -75,6 +75,7 @@ class ConnectivityCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         if not host:
             self.set_failed("Missing 'host' in config")
@@ -90,7 +91,7 @@ class ConnectivityCheck(BaseValidation):
 
         ssh = None
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
             self.report_subtest("ssh_connect", True, f"Connected to {host}")
 
             # Test command execution
@@ -157,6 +158,7 @@ class OsCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         expected_os = self.config.get("expected_os", "").lower()
 
         if not host or not key_path:
@@ -164,7 +166,7 @@ class OsCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
             try:
                 # Get OS info
                 exit_code, stdout, _ = run_ssh_command(ssh, "cat /etc/os-release")
@@ -223,13 +225,14 @@ class CpuInfoCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         if not host or not key_path:
             self.set_failed("Missing host or key_file")
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             # Check CPU count
             exit_code, stdout, _ = run_ssh_command(ssh, "nproc")
@@ -272,6 +275,34 @@ class CpuInfoCheck(BaseValidation):
 # =============================================================================
 
 
+# GPU model -> expected number of NUMA nodes with pinned CPUs.
+# Models not in this map fall back to requiring ALL NUMA nodes to have CPUs.
+GPU_EXPECTED_PINNED_NUMA: dict[str, int] = {
+    "NVIDIA GH200": 1,
+    "NVIDIA GB200": 2,
+}
+
+
+def _lookup_expected_pinned_numa(gpu_model: str) -> int | None:
+    """Look up expected pinned NUMA count for a GPU model.
+
+    Performs a case-insensitive substring match so that full nvidia-smi
+    names like ``NVIDIA A100-SXM4-80GB`` match the ``NVIDIA A100 80GB``
+    key.  Returns ``None`` if no match is found (caller should require
+    all NUMA nodes to be populated).
+    """
+    model_lower = gpu_model.lower()
+    # Try exact key match first (case-insensitive)
+    for key, count in GPU_EXPECTED_PINNED_NUMA.items():
+        if key.lower() == model_lower:
+            return count
+    # Fall back to substring match, longest key first for specificity
+    for key in sorted(GPU_EXPECTED_PINNED_NUMA, key=len, reverse=True):
+        if key.lower() in model_lower:
+            return GPU_EXPECTED_PINNED_NUMA[key]
+    return None
+
+
 class VcpuPinningCheck(BaseValidation):
     """Validate vCPU pinning and NUMA affinity on the host.
 
@@ -280,8 +311,12 @@ class VcpuPinningCheck(BaseValidation):
     - All vCPUs are online
     - NUMA topology is consistent (vCPUs grouped by NUMA node)
     - CPU affinity mask covers all expected vCPUs
-    - CPU-to-NUMA mapping is balanced (no empty NUMA nodes)
+    - CPU-to-NUMA mapping validates populated node count against GPU model
     - GPU-to-NUMA locality: GPUs share NUMA node with assigned CPUs
+
+    The expected number of NUMA nodes with pinned CPUs is derived from the
+    GPU model via ``GPU_EXPECTED_PINNED_NUMA``.  If the model is not in the
+    map, all NUMA nodes are expected to have CPUs.
 
     Config:
         host, key_file, user: SSH connection details
@@ -303,6 +338,7 @@ class VcpuPinningCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         expected_vcpus = self.config.get("expected_vcpus")
 
         if not host or not key_path:
@@ -310,7 +346,7 @@ class VcpuPinningCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             # --- Check 1: vCPU count ---
             exit_code, stdout, _ = run_ssh_command(ssh, "nproc")
@@ -351,30 +387,57 @@ class VcpuPinningCheck(BaseValidation):
                 self.report_subtest("cpu_affinity", True, affinity_info[:80])
 
             # --- Check 4: NUMA topology ---
+            # Detect GPU model to determine expected pinned NUMA count.
+            gpu_model = ""
+            exit_code, stdout, _ = run_ssh_command(
+                ssh, "nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1"
+            )
+            if exit_code == 0 and stdout.strip():
+                gpu_model = stdout.strip()
+                self.report_subtest("gpu_model", True, gpu_model)
+
+            expected_pinned: int | None = None
+            if gpu_model:
+                expected_pinned = _lookup_expected_pinned_numa(gpu_model)
+
             exit_code, stdout, _ = run_ssh_command(ssh, "lscpu | grep -E '^NUMA node[0-9]+ CPU' || echo 'no_numa'")
             if exit_code == 0 and "no_numa" not in stdout:
                 numa_lines = [line.strip() for line in stdout.strip().split("\n") if line.strip()]
                 numa_nodes = len(numa_lines)
-                # Check all NUMA nodes have CPUs assigned (balanced)
-                all_have_cpus = all(":" in line and line.split(":")[-1].strip() != "" for line in numa_lines)
-                self.report_subtest(
-                    "numa_topology",
-                    all_have_cpus,
-                    f"{numa_nodes} NUMA node(s), all populated: {all_have_cpus}",
-                )
-
-                # Report per-node detail
+                populated = 0
                 for line in numa_lines:
                     parts = line.split(":")
                     if len(parts) == 2:
                         node_name = parts[0].strip().replace("NUMA ", "").replace(" CPU(s)", "")
                         cpus = parts[1].strip()
                         cpu_cnt = parse_cpu_range_count(cpus) if cpus else 0
+                        if cpu_cnt > 0:
+                            populated += 1
                         self.report_subtest(
                             f"numa_{node_name}",
-                            cpu_cnt > 0,
-                            f"{node_name}: CPUs {cpus} ({cpu_cnt} cores)",
+                            True,
+                            f"{node_name}: CPUs {cpus} ({cpu_cnt} cores)" if cpu_cnt > 0
+                            else f"{node_name}: no CPUs (memory-only or empty)",
                         )
+
+                if expected_pinned is not None:
+                    # Known GPU: validate exact populated count
+                    topo_ok = populated == expected_pinned
+                    self.report_subtest(
+                        "numa_topology",
+                        topo_ok,
+                        f"{populated}/{numa_nodes} NUMA node(s) with CPUs "
+                        f"(expected {expected_pinned} for {gpu_model or 'config'})",
+                    )
+                else:
+                    # Unknown GPU: all NUMA nodes must have CPUs
+                    topo_ok = populated == numa_nodes
+                    self.report_subtest(
+                        "numa_topology",
+                        topo_ok,
+                        f"{populated}/{numa_nodes} NUMA node(s) with CPUs"
+                        f"{'' if topo_ok else ' (unknown GPU, expected all populated)'}",
+                    )
             else:
                 self.report_subtest("numa_topology", True, "Single NUMA node (no NUMA)")
 
@@ -451,6 +514,7 @@ class PciBusCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         expected_gpus = self.config.get("expected_gpus", ssh_cfg.get("gpu_count", 1))
         expected_link_width = self.config.get("expected_link_width")
 
@@ -459,7 +523,7 @@ class PciBusCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             # --- Check 1: NVIDIA PCI devices enumeration ---
             exit_code, stdout, _ = run_ssh_command(ssh, "lspci -d 10de: -nn 2>/dev/null || lspci | grep -i nvidia")
@@ -629,6 +693,7 @@ class HostSoftwareCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         expected_kernel = self.config.get("expected_kernel")
         expected_driver = self.config.get("expected_driver_version")
@@ -642,7 +707,7 @@ class HostSoftwareCheck(BaseValidation):
         failures: list[str] = []
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             # ==============================================================
             # 1. Linux Kernel
@@ -881,6 +946,7 @@ class GpuCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         expected_gpus = self.config.get("expected_gpus", ssh_cfg.get("gpu_count", 1))
 
         if not host or not key_path:
@@ -890,7 +956,7 @@ class GpuCheck(BaseValidation):
         self.log.info(f"Testing GPU on {host}")
 
         try:
-            ssh = get_ssh_client(host, user, key_path, timeout=60)
+            ssh = get_ssh_client(host, user, key_path, port=port, timeout=60)
 
             # Test nvidia-smi
             exit_code, stdout, stderr = run_ssh_command(ssh, "nvidia-smi")
@@ -968,6 +1034,7 @@ class DriverCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         expected_driver = self.config.get("expected_driver_version")
 
         if not host or not key_path:
@@ -975,7 +1042,7 @@ class DriverCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             # Check kernel version
             exit_code, stdout, _ = run_ssh_command(ssh, "uname -r")
@@ -1079,6 +1146,7 @@ class GpuStressCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         if not host or not key_path:
             self.set_failed("Missing host or key_file")
@@ -1096,7 +1164,7 @@ class GpuStressCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path, timeout=60)
+            ssh = get_ssh_client(host, user, key_path, port=port, timeout=60)
 
             # Auto-detect runtime if not explicitly configured
             if not container_runtime:
@@ -1201,6 +1269,7 @@ class NcclCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         if not host or not key_path:
             self.set_failed("Missing host or key_file")
@@ -1211,7 +1280,7 @@ class NcclCheck(BaseValidation):
         message_sizes = self.config.get("message_sizes", "-b 1M -e 256M -f 2")
 
         try:
-            ssh = get_ssh_client(host, user, key_path, timeout=60)
+            ssh = get_ssh_client(host, user, key_path, port=port, timeout=60)
 
             # Verify Docker + NVIDIA runtime are available (NCCL binaries come from the container)
             has_docker = _detect_ssh_container_runtime(ssh) == "docker"
@@ -1341,6 +1410,7 @@ class TrainingCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         if not host or not key_path:
             self.set_failed("Missing host or key_file")
@@ -1359,7 +1429,7 @@ class TrainingCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path, timeout=60)
+            ssh = get_ssh_client(host, user, key_path, port=port, timeout=60)
 
             if not container_runtime:
                 container_runtime = _detect_ssh_container_runtime(ssh)
@@ -1495,6 +1565,7 @@ class NvlinkCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         if not host or not key_path:
             self.set_failed("Missing host or key_file")
@@ -1504,7 +1575,7 @@ class NvlinkCheck(BaseValidation):
 
         ssh = None
         try:
-            ssh = get_ssh_client(host, user, key_path, timeout=60)
+            ssh = get_ssh_client(host, user, key_path, port=port, timeout=60)
 
             # Check NVLink status per GPU
             exit_code, stdout, _ = run_ssh_command(ssh, "nvidia-smi nvlink -s 2>/dev/null")
@@ -1591,6 +1662,7 @@ class InfiniBandCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         if not host or not key_path:
             self.set_failed("Missing host or key_file")
@@ -1600,7 +1672,7 @@ class InfiniBandCheck(BaseValidation):
 
         ssh = None
         try:
-            ssh = get_ssh_client(host, user, key_path, timeout=60)
+            ssh = get_ssh_client(host, user, key_path, port=port, timeout=60)
 
             # Check if ibstat is available
             exit_code, stdout, _ = run_ssh_command(ssh, "ibstat 2>/dev/null")
@@ -1689,6 +1761,7 @@ class EthernetCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         if not host or not key_path:
             self.set_failed("Missing host or key_file")
@@ -1698,7 +1771,7 @@ class EthernetCheck(BaseValidation):
         ping_target = self.config.get("ping_target")
 
         try:
-            ssh = get_ssh_client(host, user, key_path, timeout=60)
+            ssh = get_ssh_client(host, user, key_path, port=port, timeout=60)
 
             # List all UP interfaces
             exit_code, stdout, _ = run_ssh_command(
@@ -1791,6 +1864,7 @@ class ContainerRuntimeCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         ngc_api_key = self.config.get("ngc_api_key", get_ngc_api_key())
 
         if not host or not key_path:
@@ -1798,7 +1872,7 @@ class ContainerRuntimeCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             # Check Docker
             _, stdout, _ = run_ssh_command(ssh, "docker --version 2>/dev/null || echo 'not_found'")
@@ -1874,6 +1948,7 @@ class CloudInitCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
         metadata_url = self.config.get("metadata_url", "http://169.254.169.254/latest/meta-data/")
 
         if not host or not key_path:
@@ -1881,7 +1956,7 @@ class CloudInitCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
 
             # Check cloud-init status
             exit_code, stdout, _ = run_ssh_command(ssh, "cloud-init status 2>/dev/null || echo 'not_found'")
@@ -1891,16 +1966,19 @@ class CloudInitCheck(BaseValidation):
                 done = "done" in stdout.lower()
                 self.report_subtest("cloud_init", done, stdout.strip())
 
-            # Check metadata service reachability
-            curl_cmd = f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 {metadata_url}"
-            exit_code, stdout, _ = run_ssh_command(ssh, curl_cmd)
-            http_code = stdout.strip()
-            metadata_ok = exit_code == 0 and http_code in ("200", "301")
-            self.report_subtest(
-                "metadata_service",
-                metadata_ok,
-                f"HTTP {http_code}" if http_code else "unreachable",
-            )
+            # Check metadata service reachability (skip for noCloud / no-IMDS platforms)
+            if metadata_url.lower() == "none":
+                self.report_subtest("metadata_service", True, "skipped (no metadata service)")
+            else:
+                curl_cmd = f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 {metadata_url}"
+                exit_code, stdout, _ = run_ssh_command(ssh, curl_cmd)
+                http_code = stdout.strip()
+                metadata_ok = exit_code == 0 and http_code in ("200", "301")
+                self.report_subtest(
+                    "metadata_service",
+                    metadata_ok,
+                    f"HTTP {http_code}" if http_code else "unreachable",
+                )
 
             ssh.close()
 

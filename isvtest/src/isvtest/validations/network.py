@@ -364,6 +364,7 @@ class DhcpIpManagementCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
+        port = ssh_cfg["ssh_port"]
 
         if not host:
             self.set_failed("No SSH host configured")
@@ -373,7 +374,7 @@ class DhcpIpManagementCheck(BaseValidation):
             return
 
         try:
-            ssh = get_ssh_client(host, user, key_path)
+            ssh = get_ssh_client(host, user, key_path, port=port)
         except Exception as e:
             self.set_failed(f"SSH connection failed: {e}")
             return
