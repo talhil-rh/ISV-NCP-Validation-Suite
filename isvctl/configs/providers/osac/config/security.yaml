@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+# OSAC Security Validation Configuration
+#
+# Imports validations from the provider-agnostic security canonical config.
+# This file provides OSAC-specific commands (Keycloak service account auth).
+#
+# Currently implemented:
+#   SEC03-01: Service account credentials (ServiceAccountCredentialCheck)
+#
+# Usage:
+#   uv run isvctl test run -f isvctl/configs/providers/osac/config/security.yaml
+#
+# Required Environment Variables:
+#   OSAC_KEYCLOAK_URL, OSAC_KEYCLOAK_REALM,
+#   OSAC_KEYCLOAK_ADMIN_PASSWORD (master-realm admin password for bootstrap)
+#   Optional: OSAC_KEYCLOAK_ADMIN_USER (default "admin"),
+#             OSAC_VERIFY_SSL (default "true"),
+#             ISVCTL_DEMO_MODE
+
+import:
+  - ../../../suites/security.yaml
+
+version: "1.0"
+
+commands:
+  security:
+    phases: ["setup", "test", "teardown"]
+    steps:
+      # =======================================================================
+      # SETUP: Bootstrap ephemeral admin client
+      # =======================================================================
+      - name: bootstrap_admin
+        phase: setup
+        command: "python3 ../scripts/control-plane/bootstrap_admin.py"
+        timeout: 60
+
+      # =======================================================================
+      # TEST: Service Account Credential Auth (SEC03-01)
+      # =======================================================================
+      - name: sa_credential_test
+        phase: test
+        command: "python3 ../scripts/control-plane/sa_credential_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-secret"
+          - "{{steps.bootstrap_admin.admin_client_secret}}"
+        sensitive_args: ["--admin-client-secret"]
+        timeout: 120
+
+      # =======================================================================
+      # TEARDOWN: Cleanup bootstrap admin
+      # =======================================================================
+      - name: teardown
+        phase: teardown
+        command: "python3 ../scripts/control-plane/teardown_admin.py"
+        args:
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-uuid"
+          - "{{steps.bootstrap_admin.admin_client_uuid}}"
+        timeout: 60
+        output_schema: teardown
+
+tests:
+  cluster_name: "osac-security-validation"
+  description: "OSAC security hardening validation"
+
+  settings:
+    region: "osac-default"
