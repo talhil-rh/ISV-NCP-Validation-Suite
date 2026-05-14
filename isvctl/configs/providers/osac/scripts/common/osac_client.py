@@ -304,6 +304,51 @@ class KeycloakAdmin:
             raise RuntimeError(f"Client '{client_id}' not found (HTTP {status}): {resp}")
         return resp[0]
 
+    def get_realm_authentication_flows(self) -> list[dict[str, Any]]:
+        """GET authentication flows for the realm (MFA check)."""
+        status, resp = _request(
+            f"{self._base}/authentication/flows",
+            headers=self._headers,
+            verify_ssl=self._verify,
+        )
+        if status != 200 or not isinstance(resp, list):
+            raise RuntimeError(f"Failed to get authentication flows (HTTP {status}): {resp}")
+        return resp
+
+    def get_realm_authentication_flow_executions(self, flow_alias: str) -> list[dict[str, Any]]:
+        """GET executions for a specific authentication flow."""
+        encoded = urllib.parse.quote(flow_alias, safe="")
+        status, resp = _request(
+            f"{self._base}/authentication/flows/{encoded}/executions",
+            headers=self._headers,
+            verify_ssl=self._verify,
+        )
+        if status != 200 or not isinstance(resp, list):
+            raise RuntimeError(f"Failed to get flow executions for '{flow_alias}' (HTTP {status}): {resp}")
+        return resp
+
+    def get_realm_settings(self) -> dict[str, Any]:
+        """GET realm representation (token lifespan, etc.)."""
+        status, resp = _request(
+            f"{self._base}",
+            headers=self._headers,
+            verify_ssl=self._verify,
+        )
+        if status != 200 or not isinstance(resp, dict):
+            raise RuntimeError(f"Failed to get realm settings (HTTP {status}): {resp}")
+        return resp
+
+    def get_required_actions(self) -> list[dict[str, Any]]:
+        """GET required actions configured in the realm."""
+        status, resp = _request(
+            f"{self._base}/authentication/required-actions",
+            headers=self._headers,
+            verify_ssl=self._verify,
+        )
+        if status != 200 or not isinstance(resp, list):
+            raise RuntimeError(f"Failed to get required actions (HTTP {status}): {resp}")
+        return resp
+
     def disable_client(self, client_uuid: str) -> None:
         """Disable a client by setting ``enabled: false``."""
         payload = json.dumps({"enabled": False}).encode()
@@ -361,6 +406,75 @@ class FulfillmentClient:
         if status != 200:
             raise RuntimeError(f"Capabilities request failed (HTTP {status}): {resp}")
         return resp if isinstance(resp, dict) else {"raw": resp}
+
+    def _api_request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        data: bytes | None = None,
+        headers_override: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, Any] | str]:
+        """Issue an authenticated request to the fulfillment API."""
+        hdrs = headers_override if headers_override else self._headers
+        return _request(
+            f"{self._base}{path}",
+            method=method,
+            data=data,
+            headers=hdrs,
+            verify_ssl=self._verify,
+        )
+
+    def list_virtual_networks(self, token: str | None = None) -> tuple[int, Any]:
+        """List virtual networks. Returns ``(status, body)``."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        return self._api_request("/api/fulfillment/v1/virtual_networks", headers_override=hdrs)
+
+    def list_compute_instances(self, token: str | None = None) -> tuple[int, Any]:
+        """List compute instances. Returns ``(status, body)``."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        return self._api_request("/api/fulfillment/v1/compute_instances", headers_override=hdrs)
+
+    def create_virtual_network(self, name: str, token: str | None = None) -> tuple[int, Any]:
+        """Attempt to create a virtual network. Returns ``(status, body)``."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        payload = json.dumps({"name": name, "ipv4_cidr": "10.200.0.0/16"}).encode()
+        return self._api_request(
+            "/api/fulfillment/v1/virtual_networks",
+            method="POST",
+            data=payload,
+            headers_override=hdrs,
+        )
+
+    def create_compute_instance(self, name: str, token: str | None = None) -> tuple[int, Any]:
+        """Attempt to create a compute instance. Returns ``(status, body)``."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        payload = json.dumps({"name": name}).encode()
+        return self._api_request(
+            "/api/fulfillment/v1/compute_instances",
+            method="POST",
+            data=payload,
+            headers_override=hdrs,
+        )
+
+    def get_console_access(self, instance_id: str, token: str | None = None) -> tuple[int, Any]:
+        """Probe console access for an instance. Returns ``(status, body)``."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(instance_id, safe="")
+        return self._api_request(
+            f"/api/fulfillment/v1/compute_instances/{encoded}/console/access",
+            headers_override=hdrs,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -504,11 +618,11 @@ def bootstrap_admin_client(
     client_id: str,
     verify_ssl: bool,
 ) -> dict[str, str]:
-    """Create an ephemeral admin client with ``manage-clients`` role.
+    """Create an ephemeral admin client with ``manage-clients`` and ``view-realm`` roles.
 
     Uses master-realm credentials to:
       1. Create a service-account client in *realm*
-      2. Assign ``manage-clients`` from ``realm-management``
+      2. Assign ``manage-clients`` and ``view-realm`` from ``realm-management``
       3. Return ``{"client_id": ..., "client_secret": ..., "client_uuid": ...}``
     """
     token = _master_token(keycloak_url, verify_ssl)
@@ -576,25 +690,29 @@ def bootstrap_admin_client(
         raise RuntimeError("realm-management client not found")
     rm_uuid = rm_clients[0]["id"]
 
-    # 6. Get manage-clients role
-    status, role = _request(
-        f"{base}/clients/{rm_uuid}/roles/manage-clients",
-        headers=headers,
-        verify_ssl=verify_ssl,
-    )
-    if not isinstance(role, dict):
-        raise RuntimeError("manage-clients role not found")
+    # 6. Get manage-clients and view-realm roles
+    roles_to_assign: list[dict[str, Any]] = []
+    for role_name in ("manage-clients", "view-realm"):
+        status, role = _request(
+            f"{base}/clients/{rm_uuid}/roles/{role_name}",
+            headers=headers,
+            verify_ssl=verify_ssl,
+        )
+        if isinstance(role, dict):
+            roles_to_assign.append(role)
+        elif role_name == "manage-clients":
+            raise RuntimeError("manage-clients role not found")
 
-    # 7. Assign role
+    # 7. Assign roles
     status, _ = _request(
         f"{base}/users/{sa_user_id}/role-mappings/clients/{rm_uuid}",
         method="POST",
-        data=json.dumps([role]).encode(),
+        data=json.dumps(roles_to_assign).encode(),
         headers=headers,
         verify_ssl=verify_ssl,
     )
     if status not in (200, 204):
-        raise RuntimeError(f"Failed to assign manage-clients role (HTTP {status})")
+        raise RuntimeError(f"Failed to assign realm-management roles (HTTP {status})")
 
     return {
         "client_id": client_id,
@@ -623,3 +741,124 @@ def cleanup_admin_client(
     # 204 = success, 404 = already gone — both are fine
     if status not in (200, 204, 404):
         raise RuntimeError(f"Failed to delete admin client (HTTP {status})")
+
+
+# ---------------------------------------------------------------------------
+# OIDC discovery helpers
+# ---------------------------------------------------------------------------
+
+
+def get_oidc_discovery(config: OsacConfig) -> dict[str, Any]:
+    """Fetch the OpenID Connect discovery document for the realm."""
+    url = f"{config.keycloak_url}/realms/{config.keycloak_realm}/.well-known/openid-configuration"
+    status, resp = _request(url, verify_ssl=config.verify_ssl)
+    if status != 200 or not isinstance(resp, dict):
+        raise RuntimeError(f"OIDC discovery failed (HTTP {status}): {resp}")
+    return resp
+
+
+def get_jwks(jwks_uri: str, verify_ssl: bool = True) -> dict[str, Any]:
+    """Fetch the JWKS from the given URI."""
+    status, resp = _request(jwks_uri, verify_ssl=verify_ssl)
+    if status != 200 or not isinstance(resp, dict):
+        raise RuntimeError(f"JWKS fetch failed (HTTP {status}): {resp}")
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# JWT manipulation (stdlib-only, for crafting test tokens)
+# ---------------------------------------------------------------------------
+
+
+def _b64url_decode(s: str) -> bytes:
+    """Base64url decode without padding."""
+    padding = 4 - len(s) % 4
+    if padding != 4:
+        s += "=" * padding
+    return base64.urlsafe_b64decode(s)
+
+
+def _b64url_encode(data: bytes) -> str:
+    """Base64url encode without padding."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def decode_jwt_payload(token: str) -> dict[str, Any]:
+    """Decode the payload of a JWT without verification."""
+    parts = token.split(".")
+    if len(parts) < 2:
+        raise ValueError("Invalid JWT format")
+    return json.loads(_b64url_decode(parts[1]))
+
+
+def craft_jwt(token: str, payload_overrides: dict[str, Any] | None = None,
+              remove_claims: list[str] | None = None,
+              corrupt_signature: bool = False) -> str:
+    """Re-encode a JWT with modified payload or corrupted signature.
+
+    Used for negative OIDC testing. The resulting token will have an
+    invalid signature (expected — we're testing rejection).
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise ValueError("Invalid JWT format")
+
+    header = parts[0]
+    payload = json.loads(_b64url_decode(parts[1]))
+    signature = parts[2]
+
+    if payload_overrides:
+        payload.update(payload_overrides)
+    for claim in (remove_claims or []):
+        payload.pop(claim, None)
+
+    new_payload = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
+
+    if corrupt_signature:
+        sig_bytes = _b64url_decode(signature)
+        corrupted = bytes(b ^ 0xFF for b in sig_bytes[:8]) + sig_bytes[8:]
+        signature = _b64url_encode(corrupted)
+
+    return f"{header}.{new_payload}.{signature}"
+
+
+# ---------------------------------------------------------------------------
+# Kubernetes helpers
+# ---------------------------------------------------------------------------
+
+
+def create_sa_token(namespace: str, sa_name: str, duration: str = "3600s") -> tuple[str, int]:
+    """Create a short-lived ServiceAccount token via ``kubectl create token``.
+
+    Returns ``(token_string, ttl_seconds)``.
+    """
+    kctl = _kubectl()
+    cmd = [kctl, "create", "token", sa_name, "-n", namespace,
+           f"--duration={duration}", "--output=json"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(f"kubectl create token failed: {result.stderr.strip()}")
+
+    token_str = result.stdout.strip()
+    try:
+        token_data = json.loads(token_str)
+        token_str = token_data.get("status", {}).get("token", token_str)
+    except json.JSONDecodeError:
+        pass
+
+    payload = decode_jwt_payload(token_str)
+    exp = payload.get("exp", 0)
+    iat = payload.get("iat", 0)
+    ttl = exp - iat if exp and iat else int(duration.rstrip("s"))
+    return token_str, ttl
+
+
+def get_cert_manager_certificates() -> list[dict[str, Any]]:
+    """List cert-manager Certificate resources across all namespaces."""
+    kctl = _kubectl()
+    cmd = [kctl, "get", "certificates.cert-manager.io", "-A", "-o", "json"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        return []
+    data = json.loads(result.stdout)
+    return data.get("items", [])
