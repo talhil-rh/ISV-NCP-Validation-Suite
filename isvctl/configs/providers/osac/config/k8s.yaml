@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+# OSAC Kubernetes Cluster Validation Configuration
+# OSAC clusters run on OCP, so this config imports the OCP k8s config
+# which provides all OCP-specific overrides (control-plane log commands,
+# CSI namespace detection, MachineSet-based node pools, etc.).
+#
+# Usage:
+#   uv run isvctl test run -f isvctl/configs/providers/osac/config/k8s.yaml
+#
+#   # Run tests only (skip setup/teardown)
+#   uv run isvctl test run -f isvctl/configs/providers/osac/config/k8s.yaml --phase test
+#
+# Environment Variables:
+#   - KUBECTL: Override kubectl-compatible CLI (default: auto-detects oc)
+#   - NGC_API_KEY: NGC API key for NIM workloads
+#   - OCP_NODE_POOL_*: Node pool configuration (see ocp/scripts/k8s/create_node_pool.py)
+
+import: ../../ocp/config/k8s.yaml
+
+version: "1.0"
+
+# Command paths are resolved relative to this file's directory.
+# Override with paths to the OCP scripts since OSAC runs on OCP.
+commands:
+  kubernetes:
+    steps:
+      - name: setup
+        phase: setup
+        command: "python3 ../../ocp/scripts/k8s/setup.py"
+        output_schema: cluster
+        timeout: 300
+
+      - name: create_test_node_pool
+        phase: setup
+        command: "python3 ../../ocp/scripts/k8s/create_node_pool.py"
+        output_schema: node_pool
+        timeout: 900
+        env:
+          OCP_NODE_POOL_NAME: "isv-test-pool"
+          OCP_NODE_POOL_REPLICAS: "1"
+          OCP_NODE_POOL_LABELS_JSON: '{"isv.ncp.validation/workload":"data-ingest"}'
+          OCP_NODE_POOL_TAINTS_JSON: '[{"key":"isv.ncp.validation/dedicated","value":"test","effect":"NoSchedule"}]'
+          OCP_NODE_POOL_NODE_TYPE: "cpu"
+
+      - name: update_test_node_pool
+        phase: test
+        command: "python3 ../../ocp/scripts/k8s/create_node_pool.py"
+        output_schema: node_pool
+        timeout: 900
+        env:
+          NODE_POOL_ACTION: "Updating"
+          OCP_NODE_POOL_NAME: "isv-test-pool"
+          OCP_NODE_POOL_REPLICAS: "2"
+          OCP_NODE_POOL_LABELS_JSON: '{"isv.ncp.validation/workload":"data-ingest"}'
+          OCP_NODE_POOL_TAINTS_JSON: '[{"key":"isv.ncp.validation/dedicated","value":"test","effect":"NoSchedule"}]'
+          OCP_NODE_POOL_NODE_TYPE: "cpu"
+
+      - name: destroy_test_node_pool
+        phase: teardown
+        command: "python3 ../../ocp/scripts/k8s/destroy_node_pool.py"
+        timeout: 600
+        env:
+          OCP_NODE_POOL_NAME: "isv-test-pool"
+
+      - name: teardown
+        phase: teardown
+        command: "python3 ../../ocp/scripts/k8s/teardown.py"
+        timeout: 30
+
+tests:
+  description: "OSAC GPU cluster validation (OCP)"
