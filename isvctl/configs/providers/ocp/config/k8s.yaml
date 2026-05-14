@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+# OCP (OpenShift Container Platform) Cluster Validation Configuration
+# Validates an existing OCP GPU cluster using the canonical Kubernetes
+# validation suite (imported from suites/k8s.yaml).
+#
+# OCP-specific overrides:
+#   - Setup queries the cluster via `oc` and detects the API endpoint
+#   - Control-plane logs use `mode: command` because OCP splits each
+#     component into its own namespace (openshift-kube-apiserver, etc.)
+#   - CSI tenant credential check includes openshift-cluster-csi-drivers
+#   - Node pools are managed via MachineSet (Machine API)
+#
+# Usage:
+#   uv run isvctl test run -f isvctl/configs/providers/ocp/config/k8s.yaml
+#
+#   # Run tests only (skip setup/teardown)
+#   uv run isvctl test run -f isvctl/configs/providers/ocp/config/k8s.yaml --phase test
+#
+# Environment Variables:
+#   - KUBECTL: Override kubectl-compatible CLI (default: auto-detects oc)
+#   - NGC_API_KEY: NGC API key for NIM workloads
+#   - OCP_NODE_POOL_*: Node pool configuration (see create_node_pool.py)
+
+import: ../../../suites/k8s.yaml
+
+version: "1.0"
+
+commands:
+  kubernetes:
+    steps:
+      - name: setup
+        phase: setup
+        command: "python3 ../scripts/k8s/setup.py"
+        output_schema: cluster
+        timeout: 300 # 5 min - querying existing cluster
+
+      # Create a test node pool via MachineSet. Clones an existing
+      # MachineSet as a template and applies with the specified replicas,
+      # labels, and taints.
+      - name: create_test_node_pool
+        phase: setup
+        command: "python3 ../scripts/k8s/create_node_pool.py"
+        output_schema: node_pool
+        timeout: 900 # 15 min - MachineSet provisioning
+        env:
+          OCP_NODE_POOL_NAME: "isv-test-pool"
+          OCP_NODE_POOL_REPLICAS: "1"
+          OCP_NODE_POOL_LABELS_JSON: '{"isv.ncp.validation/workload":"data-ingest"}'
+          OCP_NODE_POOL_TAINTS_JSON: '[{"key":"isv.ncp.validation/dedicated","value":"test","effect":"NoSchedule"}]'
+          OCP_NODE_POOL_NODE_TYPE: "cpu"
+
+      # Scale the same pool to a new target count. Reuses
+      # create_node_pool.py because `oc apply` is idempotent.
+      - name: update_test_node_pool
+        phase: test
+        command: "python3 ../scripts/k8s/create_node_pool.py"
+        output_schema: node_pool
+        timeout: 900
+        env:
+          NODE_POOL_ACTION: "Updating"
+          OCP_NODE_POOL_NAME: "isv-test-pool"
+          OCP_NODE_POOL_REPLICAS: "2"
+          OCP_NODE_POOL_LABELS_JSON: '{"isv.ncp.validation/workload":"data-ingest"}'
+          OCP_NODE_POOL_TAINTS_JSON: '[{"key":"isv.ncp.validation/dedicated","value":"test","effect":"NoSchedule"}]'
+          OCP_NODE_POOL_NODE_TYPE: "cpu"
+
+      # Teardown order: destroy the test node pool before the cluster
+      # teardown so its Machines are freed cleanly.
+      - name: destroy_test_node_pool
+        phase: teardown
+        command: "python3 ../scripts/k8s/destroy_node_pool.py"
+        timeout: 600
+        env:
+          OCP_NODE_POOL_NAME: "isv-test-pool"
+
+      - name: teardown
+        phase: teardown
+        command: "python3 ../scripts/k8s/teardown.py"
+        timeout: 30
+
+tests:
+  description: "OCP GPU cluster validation"
+
+  validations:
+    kubernetes:
+      checks:
+        K8sNodeCountCheck:
+          # Keep the generic node count scoped to the baseline cluster.
+          # The test phase scales a temporary CPU node pool before this
+          # check runs; K8sNodePoolCheck validates that pool separately.
+          count: "{{ steps.setup.kubernetes.node_count | default(4, true) }}"
+          exclude_label_selector: "{{ steps.update_test_node_pool.label_selector | default('', true) }}"
+
+    k8s_observability:
+      checks:
+        K8sControlPlaneLogsCheck:
+          # OCP splits each control-plane component into its own namespace
+          # (openshift-kube-apiserver, openshift-kube-scheduler, etc.),
+          # so a single `namespace` can't find all pods. Use mode=command
+          # with explicit `oc logs` per component.
+          mode: command
+          commands:
+            kube-apiserver: >-
+              oc logs -n openshift-kube-apiserver
+              -l app=openshift-kube-apiserver
+              -c kube-apiserver --tail=20
+            kube-scheduler: >-
+              oc logs -n openshift-kube-scheduler
+              -l app=openshift-kube-scheduler
+              -c kube-scheduler --tail=20
+            kube-controller-manager: >-
+              oc logs -n openshift-kube-controller-manager
+              -l app=kube-controller-manager
+              -c kube-controller-manager --tail=20
+
+    k8s_storage:
+      checks:
+        K8sCsiTenantScopedCredentialsCheck:
+          # OCP CSI drivers typically live in openshift-cluster-csi-drivers
+          csi_driver_namespaces:
+            - "openshift-cluster-csi-drivers"
+            - "kube-system"
+
+  exclude:
+    tests: []
