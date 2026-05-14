@@ -11,10 +11,26 @@
 # OSAC Security Validation Configuration
 #
 # Imports validations from the provider-agnostic security canonical config.
-# This file provides OSAC-specific commands (Keycloak service account auth).
+# This file provides OSAC-specific commands (Keycloak, fulfillment-service,
+# cert-manager, K8s audit).
 #
 # Currently implemented:
 #   SEC03-01: Service account credentials (ServiceAccountCredentialCheck)
+#   SEC07-01: MFA enforcement (MfaEnforcedCheck)
+#   SEC01-01: OIDC user authentication (OidcUserAuthCheck)
+#   SEC02-01: Short-lived credentials (ShortLivedCredentialsCheck)
+#   SEC14-01: API endpoint isolation (ApiEndpointIsolationCheck)
+#   SEC11-01: Tenant isolation (TenantIsolationCheck)
+#   VM-SEC:   Console RBAC (ConsoleRbacCheck)
+#   SEC04-01: Least-privilege policies (LeastPrivilegePolicyCheck)
+#   SEC04-02: Minimal role enforcement (MinimalRoleEnforcementCheck)
+#   SEC08-01: Audit log entries (AuditLogEntryCheck)
+#   SEC08-02: Audit log retention (AuditLogRetentionCheck)
+#   SEC09-01: Certificate rotation (CertRotationCycleCheck)
+#
+# Not applicable to OSAC (virtual infrastructure, no bare metal):
+#   SEC12-01..03, CNP10-01: BMC checks (no BMC/IPMI/Redfish)
+#   SEC09-02..04: KMS checks (no KMS service)
 #
 # Usage:
 #   uv run isvctl test run -f isvctl/configs/providers/osac/config/security.yaml
@@ -23,7 +39,8 @@
 #   OSAC_KEYCLOAK_URL, OSAC_KEYCLOAK_REALM,
 #   OSAC_KEYCLOAK_ADMIN_PASSWORD (master-realm admin password for bootstrap)
 #   Optional: OSAC_KEYCLOAK_ADMIN_USER (default "admin"),
-#             OSAC_VERIFY_SSL (default "true"),
+#             OSAC_FULFILLMENT_URL, OSAC_VERIFY_SSL (default "true"),
+#             OSAC_TENANT_NAMESPACE (default "osac-e2e-ci"),
 #             ISVCTL_DEMO_MODE
 
 import:
@@ -60,16 +77,153 @@ commands:
         timeout: 120
 
       # =======================================================================
-      # TEARDOWN: Cleanup bootstrap admin
+      # TEST: MFA Enforcement (SEC07-01)
+      # =======================================================================
+      - name: mfa_enforcement
+        phase: test
+        command: "python3 ../scripts/security/mfa_enforcement_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-secret"
+          - "{{steps.bootstrap_admin.admin_client_secret}}"
+        sensitive_args: ["--admin-client-secret"]
+        timeout: 120
+
+      # =======================================================================
+      # TEST: OIDC User Authentication (SEC01-01)
+      # =======================================================================
+      - name: oidc_user_auth_test
+        phase: test
+        command: "python3 ../scripts/security/oidc_user_auth_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-secret"
+          - "{{steps.bootstrap_admin.admin_client_secret}}"
+        sensitive_args: ["--admin-client-secret"]
+        timeout: 180
+
+      # =======================================================================
+      # TEST: Short-Lived Credentials (SEC02-01)
+      # =======================================================================
+      - name: short_lived_credentials_test
+        phase: test
+        command: "python3 ../scripts/security/short_lived_credentials_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-secret"
+          - "{{steps.bootstrap_admin.admin_client_secret}}"
+        sensitive_args: ["--admin-client-secret"]
+        timeout: 120
+
+      # =======================================================================
+      # TEST: API Endpoint Isolation (SEC14-01)
+      # =======================================================================
+      - name: api_endpoint_isolation
+        phase: test
+        command: "python3 ../scripts/security/api_endpoint_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-secret"
+          - "{{steps.bootstrap_admin.admin_client_secret}}"
+        sensitive_args: ["--admin-client-secret"]
+        timeout: 120
+
+      # =======================================================================
+      # TEST: Tenant Isolation (SEC11-01)
+      # =======================================================================
+      - name: tenant_isolation_test
+        phase: test
+        command: "python3 ../scripts/security/tenant_isolation_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-secret"
+          - "{{steps.bootstrap_admin.admin_client_secret}}"
+        sensitive_args: ["--admin-client-secret"]
+        timeout: 180
+
+      # =======================================================================
+      # TEST: Console RBAC (VM security)
+      # =======================================================================
+      - name: console_rbac
+        phase: test
+        command: "python3 ../scripts/security/console_rbac_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-secret"
+          - "{{steps.bootstrap_admin.admin_client_secret}}"
+        sensitive_args: ["--admin-client-secret"]
+        timeout: 120
+
+      # =======================================================================
+      # TEST: Least Privilege + Minimal Role (SEC04-01/02)
+      # =======================================================================
+      - name: least_privilege_test
+        phase: test
+        command: "python3 ../scripts/security/least_privilege_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-secret"
+          - "{{steps.bootstrap_admin.admin_client_secret}}"
+        sensitive_args: ["--admin-client-secret"]
+        timeout: 120
+
+      # =======================================================================
+      # TEST: Audit Logging (SEC08-01/02)
+      # =======================================================================
+      - name: audit_logging_test
+        phase: test
+        command: "python3 ../scripts/security/audit_logging_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--admin-client-id"
+          - "{{steps.bootstrap_admin.admin_client_id}}"
+          - "--admin-client-secret"
+          - "{{steps.bootstrap_admin.admin_client_secret}}"
+        sensitive_args: ["--admin-client-secret"]
+        timeout: 120
+
+      # =======================================================================
+      # TEST: Certificate Rotation (SEC09-01)
+      # =======================================================================
+      - name: cert_rotation_test
+        phase: test
+        command: "python3 ../scripts/security/cert_rotation_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+        timeout: 120
+
+      # =======================================================================
+      # TEARDOWN: Cleanup test resources
       # =======================================================================
       - name: teardown
         phase: teardown
-        command: "python3 ../scripts/control-plane/teardown_admin.py"
+        command: "python3 ../scripts/security/teardown.py"
         args:
-          - "--admin-client-id"
-          - "{{steps.bootstrap_admin.admin_client_id}}"
-          - "--admin-client-uuid"
-          - "{{steps.bootstrap_admin.admin_client_uuid}}"
+          - "--region"
+          - "{{region}}"
         timeout: 60
         output_schema: teardown
 
