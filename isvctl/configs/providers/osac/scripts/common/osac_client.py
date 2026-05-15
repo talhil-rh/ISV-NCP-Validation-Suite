@@ -349,6 +349,40 @@ class KeycloakAdmin:
             raise RuntimeError(f"Failed to get required actions (HTTP {status}): {resp}")
         return resp
 
+    def get_service_account_user(self, client_uuid: str) -> dict[str, Any]:
+        """Get the service-account user for a client."""
+        status, resp = _request(
+            f"{self._base}/clients/{client_uuid}/service-account-user",
+            headers=self._headers,
+            verify_ssl=self._verify,
+        )
+        if status != 200 or not isinstance(resp, dict):
+            raise RuntimeError(f"Service-account user not found (HTTP {status}): {resp}")
+        return resp
+
+    def get_group_by_name(self, group_name: str) -> dict[str, Any] | None:
+        """Look up a group by name. Returns None if not found."""
+        encoded = urllib.parse.quote(group_name, safe="")
+        status, resp = _request(
+            f"{self._base}/groups?search={encoded}&exact=true",
+            headers=self._headers,
+            verify_ssl=self._verify,
+        )
+        if status == 200 and isinstance(resp, list) and resp:
+            return resp[0]
+        return None
+
+    def add_user_to_group(self, user_id: str, group_id: str) -> None:
+        """Add a user to a group."""
+        status, _ = _request(
+            f"{self._base}/users/{user_id}/groups/{group_id}",
+            method="PUT",
+            headers=self._headers,
+            verify_ssl=self._verify,
+        )
+        if status not in (200, 204):
+            raise RuntimeError(f"Failed to add user to group (HTTP {status})")
+
     def disable_client(self, client_uuid: str) -> None:
         """Disable a client by setting ``enabled: false``."""
         payload = json.dumps({"enabled": False}).encode()
@@ -709,7 +743,7 @@ def bootstrap_admin_client(
 
     # 6. Get manage-clients and view-realm roles
     roles_to_assign: list[dict[str, Any]] = []
-    for role_name in ("manage-clients", "view-realm"):
+    for role_name in ("manage-clients", "view-realm", "manage-users"):
         status, role = _request(
             f"{base}/clients/{rm_uuid}/roles/{role_name}",
             headers=headers,

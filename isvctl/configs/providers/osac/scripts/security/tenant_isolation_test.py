@@ -253,18 +253,18 @@ def main() -> int:
         result["tests"]["compute_isolated"] = {"passed": compute_isolated, "message": compute_msg}
 
         # --- storage_isolated ---
-        # OSAC has no storage API to probe. Cannot verify — report as
-        # not tested. The validation framework requires passed=True/False;
-        # per-subtest skip is not supported. An honest False is better
-        # than a false True.
+        # Delegate to the OCP storage isolation probe.
+        from common.ocp_probes import probe_storage_isolation
+        probe_data = probe_storage_isolation(
+            namespace_a=config.tenant_namespace,
+            namespace_b="default",
+        )
         result["tests"]["storage_isolated"] = {
-            "passed": False,
-            "message": "Not testable: no storage API to probe (isolation enforced via K8s namespace scoping)",
+            "passed": probe_data.get("storage_isolated", False),
+            "message": probe_data.get("message") or probe_data.get("error", "No result"),
         }
 
-        # Success reflects only the three API-probed surfaces
-        testable = ["network_isolated", "data_isolated", "compute_isolated"]
-        result["success"] = all(result["tests"][k]["passed"] for k in testable)
+        result["success"] = all(t["passed"] for t in result["tests"].values())
 
         # Clean up the probe VNet
         if vnet_id:
