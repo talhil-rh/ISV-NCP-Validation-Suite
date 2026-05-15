@@ -117,10 +117,17 @@ def main() -> int:
         token = get_admin_token(config)
         admin = KeycloakAdmin(config, token)
 
-        # Create a minimal client (no special roles)
+        # Create a minimal client (no special roles) and assign it to a
+        # tenant group so the fulfillment-service can resolve a tenant
+        # from the JWT groups claim (avoids 500 from empty tenants).
         client_rep = admin.create_client(test_client_id)
         client_uuid = client_rep["id"]
         secret = admin.get_client_secret(client_uuid)
+
+        group = admin.get_group_by_name("isv-test-tenant")
+        if group:
+            sa_user = admin.get_service_account_user(client_uuid)
+            admin.add_user_to_group(sa_user["id"], group["id"])
 
         result["test_identity"] = test_client_id
         result["allowed_resource"] = "capabilities"
@@ -183,7 +190,7 @@ def main() -> int:
         # with the minimal Keycloak client (which has no tenant group).
         try:
             from common.osac_client import create_sa_token
-            sa_token, _ = create_sa_token(config.tenant_namespace, "admin", "300s")
+            sa_token, _ = create_sa_token(config.tenant_namespace, "admin", "3600s")
             sa_list_status, _ = fc.list_virtual_networks(token=sa_token)
         except Exception:
             sa_list_status = -1
@@ -234,12 +241,15 @@ def main() -> int:
             "message": f"CreateComputeInstance returned HTTP {ci_status}",
         }
 
-        # storage_denied: OSAC has no storage API to probe. Cannot verify.
-        # Per-subtest skip not supported by validation framework; honest
-        # False is better than a false True.
+        # storage_denied: Delegate to OCP storage isolation probe.
+        from common.ocp_probes import probe_storage_isolation
+        probe_data = probe_storage_isolation(
+            namespace_a=config.tenant_namespace,
+            namespace_b="default",
+        )
         result["tests"]["out_of_scope_storage_denied"] = {
-            "passed": False,
-            "message": "Not testable: no storage API to probe (denied via K8s namespace isolation)",
+            "passed": probe_data.get("storage_denied", False),
+            "message": probe_data.get("message") or probe_data.get("error", "No result"),
         }
 
         # network_denied: Try to create a VirtualNetwork
@@ -253,8 +263,7 @@ def main() -> int:
             "message": f"CreateVirtualNetwork returned HTTP {vn_status}",
         }
 
-        testable = [k for k in result["tests"] if k != "out_of_scope_storage_denied"]
-        result["success"] = all(result["tests"][k]["passed"] for k in testable)
+        result["success"] = all(t["passed"] for t in result["tests"].values())
 
     except Exception as e:
         result["error"] = str(e)

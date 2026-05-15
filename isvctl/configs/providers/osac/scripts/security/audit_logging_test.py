@@ -287,11 +287,23 @@ def main() -> int:
                 else "No creators in event metadata",
             }
 
-            # source IP: not available in fulfillment Events API
-            result["tests"]["audit_log_source_ip_present"] = {"passed": False}
+            # source IP and user agent: not available in fulfillment Events API.
+            # Delegate to the OCP kube-apiserver audit log probe.
+            from common.ocp_probes import probe_audit_log
+            probe_data = probe_audit_log(namespace=args.namespace)
 
-            # user agent: not available in fulfillment Events API
-            result["tests"]["audit_log_user_agent_matches"] = {"passed": False}
+            source_ips = probe_data.get("source_ips", [])
+            result["tests"]["audit_log_source_ip_present"] = {
+                "passed": len(source_ips) > 0,
+                "message": f"Source IPs: {', '.join(source_ips)}" if source_ips
+                else probe_data.get("error", "No source IPs"),
+            }
+            user_agent = probe_data.get("user_agent", "")
+            result["tests"]["audit_log_user_agent_matches"] = {
+                "passed": bool(user_agent),
+                "message": f"User agent: {user_agent}" if user_agent
+                else probe_data.get("error", "No user agent"),
+            }
 
             # region: tenants from metadata
             tenants = metadata.get("tenants", [])
