@@ -107,65 +107,84 @@ def main() -> int:
         try:
             required_actions = admin.get_required_actions()
         except RuntimeError:
-            required_actions = []
+            required_actions = None
+        if required_actions is None:
+            result["skipped"] = True
+            result["skip_reason"] = "Admin client lacks view-realm permission to query MFA configuration"
+            print(json.dumps(result, indent=2))
+            return 0
+
         otp_actions = [a for a in required_actions if a.get("alias") in ("CONFIGURE_TOTP", "webauthn-register")]
         otp_default_action = any(a.get("defaultAction", False) for a in otp_actions)
 
-        # root_mfa_enabled: check if OTP is a default required action
-        # (enforced for all users including admin)
-        if otp_default_action:
-            result["tests"]["root_mfa_enabled"] = {"passed": True, "message": "OTP is a default required action"}
-        else:
-            result["tests"]["root_mfa_enabled"] = {
-                "passed": True,
-                "message": "OTP required action exists (Keycloak admin auth is master-realm scoped)",
-            }
+        # root_mfa_enabled: OTP must be a default required action (enforced for
+        # all new users). If it's not, this is a real failure — MFA is not enforced.
+        result["tests"]["root_mfa_enabled"] = {
+            "passed": otp_default_action,
+            "message": "OTP is a default required action" if otp_default_action
+            else "OTP is NOT a default required action — MFA not enforced for new users",
+        }
         interfaces_checked += 1
 
-        # console_users_mfa: check browser authentication flow for OTP
+        # console_users_mfa: browser authentication flow must include OTP
         try:
             flows = admin.get_realm_authentication_flows()
         except RuntimeError:
-            flows = []
+            flows = None
+        if flows is None:
+            result["skipped"] = True
+            result["skip_reason"] = "Admin client lacks view-realm permission to query authentication flows"
+            print(json.dumps(result, indent=2))
+            return 0
+
         browser_flow = next((f for f in flows if f.get("alias") == "browser"), None)
         if browser_flow:
             executions = admin.get_realm_authentication_flow_executions("browser")
-            has_otp = _check_otp_in_flow(executions)
+            browser_has_otp = _check_otp_in_flow(executions)
             result["tests"]["console_users_mfa"] = {
-                "passed": has_otp,
-                "message": "Browser flow has OTP subflow" if has_otp else "Browser flow missing OTP requirement",
+                "passed": browser_has_otp,
+                "message": "Browser flow has OTP subflow" if browser_has_otp
+                else "Browser flow missing OTP requirement",
             }
         else:
             result["tests"]["console_users_mfa"] = {"passed": False, "message": "Browser flow not found"}
+            browser_has_otp = False
         interfaces_checked += 1
 
-        # api_mfa_policy: check direct grant flow for OTP
+        # api_mfa_policy: OSAC API uses client_credentials grant (service
+        # accounts), which bypasses user auth flows. The relevant MFA surface
+        # for interactive API access is the browser flow. Report whether
+        # the browser flow enforces OTP — that's the actual control.
         direct_grant_flow = next((f for f in flows if f.get("alias") == "direct grant"), None)
         if direct_grant_flow:
-            executions = admin.get_realm_authentication_flow_executions("direct grant")
-            has_otp = _check_otp_in_flow(executions)
-            result["tests"]["api_mfa_policy"] = {
-                "passed": has_otp,
-                "message": "Direct grant flow has OTP" if has_otp else "Direct grant flow missing OTP (client_credentials bypass expected)",
-            }
-            if not has_otp:
-                # client_credentials grant (service accounts) skips user auth flows;
-                # this is expected for API access — mark as passed with note
-                result["tests"]["api_mfa_policy"] = {
-                    "passed": True,
-                    "message": "API uses client_credentials grant (service account); user MFA enforced via browser flow",
-                }
+            dg_executions = admin.get_realm_authentication_flow_executions("direct grant")
+            dg_has_otp = _check_otp_in_flow(dg_executions)
+            # If direct grant has OTP, great. If not, the API check depends on
+            # whether the browser flow (the interactive path) has OTP.
+            api_mfa_ok = dg_has_otp or browser_has_otp
+            if dg_has_otp:
+                msg = "Direct grant flow has OTP"
+            elif browser_has_otp:
+                msg = "Direct grant lacks OTP but browser flow (interactive path) enforces it"
+            else:
+                msg = "Neither direct grant nor browser flow enforces OTP"
+            result["tests"]["api_mfa_policy"] = {"passed": api_mfa_ok, "message": msg}
         else:
+            # No direct grant flow at all — API MFA depends entirely on browser flow
             result["tests"]["api_mfa_policy"] = {
-                "passed": True,
-                "message": "No direct grant flow; API access uses client_credentials (MFA N/A for service accounts)",
+                "passed": browser_has_otp,
+                "message": "No direct grant flow; browser flow OTP "
+                + ("enforced" if browser_has_otp else "NOT enforced"),
             }
         interfaces_checked += 1
 
-        # cli_mfa_policy: same flow applies to CLI usage
+        # cli_mfa_policy: independently check whether CLI users go through a
+        # flow with OTP. OSAC CLI uses device-code or browser-based auth,
+        # which routes through the browser flow.
         result["tests"]["cli_mfa_policy"] = {
-            "passed": result["tests"]["api_mfa_policy"]["passed"],
-            "message": "CLI uses same auth flow as API",
+            "passed": browser_has_otp,
+            "message": "CLI routes through browser flow; OTP "
+            + ("enforced" if browser_has_otp else "NOT enforced"),
         }
         interfaces_checked += 1
 

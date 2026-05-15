@@ -439,12 +439,29 @@ class FulfillmentClient:
             hdrs["Authorization"] = f"Bearer {token}"
         return self._api_request("/api/fulfillment/v1/compute_instances", headers_override=hdrs)
 
-    def create_virtual_network(self, name: str, token: str | None = None) -> tuple[int, Any]:
-        """Attempt to create a virtual network. Returns ``(status, body)``."""
+    def list_network_classes(self, token: str | None = None) -> tuple[int, Any]:
+        """List network classes. Returns ``(status, body)``."""
         hdrs = dict(self._headers)
         if token:
             hdrs["Authorization"] = f"Bearer {token}"
-        payload = json.dumps({"name": name, "ipv4_cidr": "10.200.0.0/16"}).encode()
+        return self._api_request("/api/fulfillment/v1/network_classes", headers_override=hdrs)
+
+    def create_virtual_network(
+        self, name: str, token: str | None = None, network_class: str = ""
+    ) -> tuple[int, Any]:
+        """Attempt to create a virtual network. Returns ``(status, body)``.
+
+        The REST gateway maps ``body: "object"`` so the HTTP body IS the
+        VirtualNetwork message directly (metadata + spec), not wrapped in
+        an ``object`` key.
+        """
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        spec: dict[str, Any] = {"ipv4_cidr": "10.200.0.0/16"}
+        if network_class:
+            spec["network_class"] = network_class
+        payload = json.dumps({"metadata": {"name": name}, "spec": spec}).encode()
         return self._api_request(
             "/api/fulfillment/v1/virtual_networks",
             method="POST",

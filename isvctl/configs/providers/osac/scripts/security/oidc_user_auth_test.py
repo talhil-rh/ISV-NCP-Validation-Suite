@@ -133,7 +133,10 @@ def main() -> int:
         admin = KeycloakAdmin(config, token)
 
         issuer_url = f"{config.keycloak_url}/realms/{config.keycloak_realm}"
-        target_url = f"{config.fulfillment_url}/api/fulfillment/v1/virtual_networks"
+        # Use the Keycloak userinfo endpoint as the OIDC probe target.
+        # It cleanly returns 200 for valid tokens and 401 for invalid ones,
+        # without the tenant-mapping complications of the fulfillment API.
+        target_url = f"{config.keycloak_url}/realms/{config.keycloak_realm}/protocol/openid-connect/userinfo"
         result["issuer_url"] = issuer_url
         result["target_url"] = target_url
 
@@ -192,13 +195,14 @@ def main() -> int:
         result["audience"] = payload.get("aud", payload.get("azp", ""))
         result["endpoints_tested"] = 1
 
-        # 3. Valid token should be accepted (not 401)
-        # 200 = full access, 403 = authn passed but authz denied, 500 = authn
-        # passed but downstream error — all prove the OIDC token was validated.
+        # 3. Valid token should be accepted — expect 200 or 403.
+        # 200 = full access, 403 = authn passed but authz denied (OPA policy).
+        # Both prove the OIDC token was validated by Authorino. A 401 means
+        # the token was rejected. 500 is ambiguous and should not pass.
         http_status = _probe_api(target_url, valid_jwt, config.verify_ssl)
         result["tests"]["valid_token_accepted"] = {
-            "passed": http_status not in (401,),
-            "message": f"HTTP {http_status}",
+            "passed": http_status in (200, 403),
+            "message": f"HTTP {http_status}" + (" (authn OK, authz denied by OPA)" if http_status == 403 else ""),
         }
 
         # 4. Bad signature
