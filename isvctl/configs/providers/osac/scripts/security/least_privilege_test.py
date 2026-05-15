@@ -234,12 +234,12 @@ def main() -> int:
             "message": f"CreateComputeInstance returned HTTP {ci_status}",
         }
 
-        # storage_denied: OSAC has no direct storage API. Storage access
-        # is structurally denied by K8s namespace isolation — a minimal
-        # client's service account cannot access PVCs in other namespaces.
+        # storage_denied: OSAC has no storage API to probe. Cannot verify.
+        # Per-subtest skip not supported by validation framework; honest
+        # False is better than a false True.
         result["tests"]["out_of_scope_storage_denied"] = {
-            "passed": True,
-            "message": "Structural: K8s namespace isolation denies cross-tenant PVC access (not API-probed)",
+            "passed": False,
+            "message": "Not testable: no storage API to probe (denied via K8s namespace isolation)",
         }
 
         # network_denied: Try to create a VirtualNetwork
@@ -253,7 +253,8 @@ def main() -> int:
             "message": f"CreateVirtualNetwork returned HTTP {vn_status}",
         }
 
-        result["success"] = all(t["passed"] for t in result["tests"].values())
+        testable = [k for k in result["tests"] if k != "out_of_scope_storage_denied"]
+        result["success"] = all(result["tests"][k]["passed"] for k in testable)
 
     except Exception as e:
         result["error"] = str(e)

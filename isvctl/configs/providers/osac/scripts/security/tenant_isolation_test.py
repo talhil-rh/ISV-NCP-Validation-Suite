@@ -232,31 +232,39 @@ def main() -> int:
             }
 
         # --- compute_isolated ---
-        ci_status, _ci_body = fc.list_compute_instances(token=tenant_a_jwt)
+        # Inspect the response body to verify Tenant A can't see admin's instances.
+        ci_status, ci_body = fc.list_compute_instances(token=tenant_a_jwt)
         if ci_status in (401, 403, 500):
             compute_isolated = True
             compute_msg = f"HTTP {ci_status}: Tenant A denied/no tenant access for ComputeInstance list"
-        elif ci_status == 200:
-            compute_isolated = True
-            compute_msg = "Tenant A sees only own ComputeInstances (tenant-scoped query)"
+        elif ci_status == 200 and isinstance(ci_body, dict):
+            ci_items = ci_body.get("items", ci_body.get("compute_instances", []))
+            ci_count = len(ci_items) if isinstance(ci_items, list) else 0
+            # A freshly-created test client should see 0 instances (no instances
+            # belong to its tenant). Any instances visible would be cross-tenant leakage.
+            compute_isolated = ci_count == 0
+            compute_msg = (
+                f"Tenant A sees {ci_count} ComputeInstances (expected 0)"
+                if ci_count == 0 else f"Tenant A sees {ci_count} ComputeInstances — possible cross-tenant leakage"
+            )
         else:
             compute_isolated = False
             compute_msg = f"Unexpected HTTP {ci_status}"
         result["tests"]["compute_isolated"] = {"passed": compute_isolated, "message": compute_msg}
 
         # --- storage_isolated ---
-        # OSAC has no direct storage API to probe. Storage isolation is
-        # structurally enforced: the osac-operator binds each Tenant to its
-        # own namespace and StorageClass (tenant_controller.go:234-321).
-        # PVCs in Tenant A's namespace cannot reference Tenant B's
-        # StorageClass. This is an architectural guarantee, not a
-        # rationalization — but it cannot be probed via the fulfillment API.
+        # OSAC has no storage API to probe. Cannot verify — report as
+        # not tested. The validation framework requires passed=True/False;
+        # per-subtest skip is not supported. An honest False is better
+        # than a false True.
         result["tests"]["storage_isolated"] = {
-            "passed": True,
-            "message": "Structural: per-tenant namespace + StorageClass binding (not API-probed)",
+            "passed": False,
+            "message": "Not testable: no storage API to probe (isolation enforced via K8s namespace scoping)",
         }
 
-        result["success"] = all(t["passed"] for t in result["tests"].values())
+        # Success reflects only the three API-probed surfaces
+        testable = ["network_isolated", "data_isolated", "compute_isolated"]
+        result["success"] = all(result["tests"][k]["passed"] for k in testable)
 
         # Clean up the probe VNet
         if vnet_id:
