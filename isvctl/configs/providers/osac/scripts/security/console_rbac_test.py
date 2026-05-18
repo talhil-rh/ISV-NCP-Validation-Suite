@@ -112,12 +112,19 @@ def main() -> int:
 
         token = get_admin_token(config)
         admin = KeycloakAdmin(config, token)
-        fc = FulfillmentClient(config, token)
+
+        # Use a K8s SA token to discover instances (Keycloak admin JWT
+        # lacks tenant groups and gets 500 from the fulfillment API).
+        from common.osac_client import create_sa_token
+        try:
+            sa_token, _ = create_sa_token(config.tenant_namespace, "admin", "3600s")
+        except RuntimeError:
+            sa_token = ""
+        fc = FulfillmentClient(config, sa_token if sa_token else token)
 
         # Determine instance ID to test
         instance_id = args.instance_id
         if not instance_id:
-            # Try to find an existing instance
             ci_status, ci_resp = fc.list_compute_instances()
             if ci_status == 200 and isinstance(ci_resp, dict):
                 items = ci_resp.get("items", ci_resp.get("compute_instances", []))
