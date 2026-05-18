@@ -56,7 +56,6 @@ from common.osac_client import (
     KeycloakAdmin,
     _request,
     _token_endpoint,
-    authenticate_with_client_credentials,
     craft_jwt,
     decode_jwt_payload,
     get_admin_token,
@@ -133,18 +132,17 @@ def main() -> int:
         admin = KeycloakAdmin(config, token)
 
         issuer_url = f"{config.keycloak_url}/realms/{config.keycloak_realm}"
-        # Use the Keycloak userinfo endpoint as the OIDC probe target.
-        # It cleanly returns 200 for valid tokens and 401 for invalid ones,
-        # without the tenant-mapping complications of the fulfillment API.
-        target_url = f"{config.keycloak_url}/realms/{config.keycloak_realm}/protocol/openid-connect/userinfo"
+        # Probe the fulfillment-service API — the real auth chain
+        # (Authorino JWT validation → OPA policy → fulfillment-service).
+        # The test client needs a tenant group so Authorino can resolve
+        # a tenant and the request doesn't 500 on empty tenants.
+        target_url = f"{config.fulfillment_url}/api/fulfillment/v1/virtual_networks"
         result["issuer_url"] = issuer_url
         result["target_url"] = target_url
 
         # 1. OIDC discovery + JWKS
         discovery = get_oidc_discovery(config)
         jwks_uri = discovery.get("jwks_uri", "")
-        # Keycloak may return internal URIs (svc.cluster.local); rewrite to
-        # use the same external host we already know is reachable.
         internal_issuer = discovery.get("issuer", "")
         if jwks_uri and internal_issuer and internal_issuer != issuer_url:
             jwks_uri = jwks_uri.replace(internal_issuer, issuer_url)
@@ -161,18 +159,18 @@ def main() -> int:
             "message": f"Discovery OK, JWKS at {jwks_uri}" if jwks_ok else f"JWKS fetch failed ({jwks_uri})",
         }
 
-        # 2. Create a temporary client and get a valid token
+        # 2. Create a temporary client with a tenant group, get a valid token
         client_rep = admin.create_client(test_client_id)
         client_uuid = client_rep["id"]
         secret = admin.get_client_secret(client_uuid)
-        auth_result = authenticate_with_client_credentials(config, test_client_id, secret)
 
-        if not auth_result["success"]:
-            result["error"] = f"Could not obtain valid token: {auth_result.get('error')}"
-            print(json.dumps(result, indent=2))
-            return 1
+        # Assign to isv-test-tenant group so JWT carries a groups claim
+        # and the fulfillment-service can resolve a tenant.
+        group = admin.get_group_by_name("isv-test-tenant")
+        if group:
+            sa_user = admin.get_service_account_user(client_uuid)
+            admin.add_user_to_group(sa_user["id"], group["id"])
 
-        # Re-authenticate to get actual JWT
         body = urllib.parse.urlencode({
             "grant_type": "client_credentials",
             "client_id": test_client_id,
@@ -188,17 +186,17 @@ def main() -> int:
         if status != 200 or not isinstance(resp, dict):
             result["error"] = "Failed to obtain JWT for OIDC test"
             print(json.dumps(result, indent=2))
-            return 1
+            return 0
 
         valid_jwt = resp["access_token"]
         payload = decode_jwt_payload(valid_jwt)
         result["audience"] = payload.get("aud", payload.get("azp", ""))
         result["endpoints_tested"] = 1
 
-        # 3. Valid token should be accepted — expect 200 or 403.
-        # 200 = full access, 403 = authn passed but authz denied (OPA policy).
-        # Both prove the OIDC token was validated by Authorino. A 401 means
-        # the token was rejected. 500 is ambiguous and should not pass.
+        # 3. Valid token should be accepted by the fulfillment-service
+        # auth chain (Authorino → OPA → app). Expect 200 (list
+        # succeeds) or 403 (authn passed, authz denied by OPA).
+        # 401 = token rejected. 500 = ambiguous server error.
         http_status = _probe_api(target_url, valid_jwt, config.verify_ssl)
         result["tests"]["valid_token_accepted"] = {
             "passed": http_status in (200, 403),

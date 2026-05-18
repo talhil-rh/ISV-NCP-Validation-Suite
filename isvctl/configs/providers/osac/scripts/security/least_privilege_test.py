@@ -197,35 +197,58 @@ def main() -> int:
         min_list_status, _ = fc.list_virtual_networks(token=minimal_token)
 
         if sa_list_status == 200 and min_list_status != 200:
-            resource_ok = True
+            resource_ok = min_list_status in (401, 403)
             resource_msg = f"K8s SA sees resources (HTTP {sa_list_status}), JWT client denied (HTTP {min_list_status})"
         elif sa_list_status == 200 and min_list_status == 200:
             resource_ok = True
             resource_msg = "Both tokens accepted; tenant filtering applied at query level"
-        elif min_list_status in (401, 403, 500):
+        elif min_list_status in (401, 403):
             resource_ok = True
-            resource_msg = f"JWT client denied resource list (HTTP {min_list_status}) — tenant group required"
+            resource_msg = f"JWT client denied resource list (HTTP {min_list_status})"
         else:
             resource_ok = False
             resource_msg = f"SA list={sa_list_status}, JWT list={min_list_status}"
         result["tests"]["policy_dimensions_resource_based"] = {"passed": resource_ok, "message": resource_msg}
 
-        # network_based: Verify the API endpoint resolves to a private IP.
-        import ipaddress
-        import socket
-        from urllib.parse import urlparse
-        api_host = urlparse(config.fulfillment_url).hostname or ""
-        try:
-            ips = [r[4][0] for r in socket.getaddrinfo(api_host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)]
-            all_private = all(ipaddress.ip_address(ip).is_private or ipaddress.ip_address(ip).is_loopback for ip in ips)
-            result["tests"]["policy_dimensions_network_based"] = {
-                "passed": all_private,
-                "message": f"{api_host} resolves to {'private' if all_private else 'PUBLIC'} IPs: {', '.join(set(ips))}",
-            }
-        except Exception as e:
+        # network_based: Verify the fulfillment API is protected by
+        # Authorino (AuthConfig with authentication + authorization).
+        # This proves API access is gated, not open to any network caller.
+        import shutil
+        import subprocess
+        kctl = shutil.which("kubectl") or shutil.which("oc") or ""
+        namespace = config.tenant_namespace
+        if kctl:
+            ac_cmd = [kctl, "get", "authconfigs", "-n", namespace, "-o", "json"]
+            ac_result = subprocess.run(ac_cmd, capture_output=True, text=True, timeout=15)
+            if ac_result.returncode == 0:
+                ac_data = json.loads(ac_result.stdout)
+                ac_items = ac_data.get("items", [])
+                has_authn = False
+                has_authz = False
+                ac_name = ""
+                for ac in ac_items:
+                    authn = ac.get("spec", {}).get("authentication", {})
+                    authz = ac.get("spec", {}).get("authorization", {})
+                    if authn and authz:
+                        has_authn = True
+                        has_authz = True
+                        ac_name = ac["metadata"]["name"]
+                        break
+                network_ok = has_authn and has_authz
+                result["tests"]["policy_dimensions_network_based"] = {
+                    "passed": network_ok,
+                    "message": f"AuthConfig '{ac_name}' enforces authentication + authorization"
+                    if network_ok else "No AuthConfig with both authentication and authorization found",
+                }
+            else:
+                result["tests"]["policy_dimensions_network_based"] = {
+                    "passed": False,
+                    "message": f"Could not query AuthConfigs: {ac_result.stderr.strip()}",
+                }
+        else:
             result["tests"]["policy_dimensions_network_based"] = {
                 "passed": False,
-                "message": f"Could not resolve {api_host}: {e}",
+                "message": "kubectl/oc not available to query AuthConfig",
             }
 
         # SEC04-02: Out-of-scope denial checks

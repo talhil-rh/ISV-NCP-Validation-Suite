@@ -313,10 +313,14 @@ def main() -> int:
                 else "No tenant scope in event",
             }
 
-            # event source: the event came from the fulfillment-service
+            # event source: verify the event identifies its source (the
+            # event type or payload type proves it came from the
+            # fulfillment-service, not from an arbitrary source).
+            has_typed_payload = any(probe_event.get(k) for k in resource_keys)
             result["tests"]["audit_log_event_source_matches"] = {
-                "passed": True,
-                "message": f"Event source: fulfillment-service Events API ({grpc_endpoint})",
+                "passed": has_typed_payload and bool(ev_type),
+                "message": f"Event type={ev_type}, payload={'present' if has_typed_payload else 'missing'}"
+                + f" via {grpc_endpoint}",
             }
         else:
             if vn_status not in (200, 201):
@@ -344,7 +348,6 @@ def main() -> int:
         # ---------------------------------------------------------------
         # SEC08-02: Audit log retention — verify actual configuration
         # ---------------------------------------------------------------
-        kctl = _kubectl()
         audit_config = _check_audit_policy()
         if audit_config:
             spec = audit_config.get("spec", {})
@@ -377,15 +380,13 @@ def main() -> int:
                     + (" (>= 30)" if retention_ok else " (< 30 — policy violation)"),
                 }
             elif logging_enabled:
-                log_cmd = [kctl, "logs", "-n", "openshift-kube-apiserver",
-                           "-l", "apiserver=true", "--tail=1", "--ignore-errors"]
-                log_result = subprocess.run(log_cmd, capture_output=True, text=True, timeout=15)
-                has_recent_logs = log_result.returncode == 0 and bool(log_result.stdout.strip())
-                result["tests"]["audit_log_retention_at_least_30_days"] = {
-                    "passed": has_recent_logs,
-                    "message": "API server audit logs accessible on control plane"
-                    if has_recent_logs else "Could not verify audit log retention from control plane",
-                }
+                # No explicit retention config. Cannot verify 30-day
+                # retention from the audit policy alone — skip honestly.
+                result["audit_log_retention_skipped"] = True
+                result["audit_log_retention_skip_reason"] = (
+                    f"Audit profile '{audit_profile}' is active but no explicit "
+                    "retention policy configured; cannot verify 30-day retention"
+                )
             else:
                 result["tests"]["audit_log_retention_at_least_30_days"] = {
                     "passed": False,
