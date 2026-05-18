@@ -125,7 +125,10 @@ def main() -> int:
                     instance_id = items[0].get("id", items[0].get("name", ""))
 
         if not instance_id:
-            instance_id = "nonexistent-test-instance"
+            result["skipped"] = True
+            result["skip_reason"] = "No ComputeInstance found; cannot test console RBAC without a real instance"
+            print(json.dumps(result, indent=2))
+            return 0
 
         result["instance_id"] = instance_id
         result["restricted_actions"] = ["console/connect", "console/access"]

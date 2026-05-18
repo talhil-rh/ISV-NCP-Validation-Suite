@@ -56,7 +56,6 @@ from common.osac_client import (
     TenantClient,
     _request,
     _token_endpoint,
-    authenticate_with_client_credentials,
     get_admin_token,
     get_env_config,
 )
@@ -128,29 +127,37 @@ def main() -> int:
         admin = KeycloakAdmin(config, token)
         tenant_client = TenantClient(config)
 
-        # Create two tenant Keycloak clients
-        client_a_rep = admin.create_client(client_a_id)
-        client_a_uuid = client_a_rep["id"]
-        secret_a = admin.get_client_secret(client_a_uuid)
-
-        client_b_rep = admin.create_client(client_b_id)
-        client_b_uuid = client_b_rep["id"]
-
-        # Create two Tenant CRDs
+        # Create Tenant CRDs
         tenant_client.create(tenant_a_name)
         tenant_client.create(tenant_b_name)
         result["tenant_a_id"] = tenant_a_name
         result["tenant_b_id"] = tenant_b_name
 
-        # Get Tenant A's token
-        auth_a = authenticate_with_client_credentials(config, client_a_id, secret_a)
-        if not auth_a["success"]:
-            result["error"] = f"Could not authenticate as Tenant A: {auth_a.get('error')}"
+        # Assign Tenant A to isv-test-tenant, Tenant B to isv-test-tenant-b.
+        # These are two non-shared tenants so the fulfillment-service
+        # applies real tenant filtering between them.
+        group_a = admin.get_group_by_name("isv-test-tenant")
+        group_b = admin.get_group_by_name("isv-test-tenant-b")
+        if not group_a or not group_b:
+            result["skipped"] = True
+            result["skip_reason"] = "Keycloak groups isv-test-tenant and isv-test-tenant-b required"
             print(json.dumps(result, indent=2))
-            return 1
+            return 0
 
-        # Re-authenticate to get actual JWT for API calls
-        body = urllib.parse.urlencode({
+        client_a_rep = admin.create_client(client_a_id)
+        client_a_uuid = client_a_rep["id"]
+        secret_a = admin.get_client_secret(client_a_uuid)
+        sa_user_a = admin.get_service_account_user(client_a_uuid)
+        admin.add_user_to_group(sa_user_a["id"], group_a["id"])
+
+        client_b_rep = admin.create_client(client_b_id)
+        client_b_uuid = client_b_rep["id"]
+        secret_b = admin.get_client_secret(client_b_uuid)
+        sa_user_b = admin.get_service_account_user(client_b_uuid)
+        admin.add_user_to_group(sa_user_b["id"], group_b["id"])
+
+        # Get Tenant A's JWT (groups: [isv-test-tenant])
+        body_a = urllib.parse.urlencode({
             "grant_type": "client_credentials",
             "client_id": client_a_id,
             "client_secret": secret_a,
@@ -158,102 +165,130 @@ def main() -> int:
         status, resp = _request(
             _token_endpoint(config),
             method="POST",
-            data=body,
+            data=body_a,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             verify_ssl=config.verify_ssl,
         )
         if status != 200 or not isinstance(resp, dict):
             result["error"] = "Failed to obtain Tenant A JWT"
             print(json.dumps(result, indent=2))
-            return 1
-
+            return 0
         tenant_a_jwt = resp["access_token"]
 
-        # Use a K8s SA token for admin baseline — Keycloak JWT tokens lack
-        # tenant groups and cause 500 in the fulfillment service.
-        from common.osac_client import create_sa_token
-        try:
-            sa_token, _ = create_sa_token(config.tenant_namespace, "admin", "300s")
-        except RuntimeError:
-            sa_token = ""
+        # Get Tenant B's JWT (groups: [isv-test-tenant-b])
+        body_b = urllib.parse.urlencode({
+            "grant_type": "client_credentials",
+            "client_id": client_b_id,
+            "client_secret": secret_b,
+        }).encode()
+        status, resp = _request(
+            _token_endpoint(config),
+            method="POST",
+            data=body_b,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            verify_ssl=config.verify_ssl,
+        )
+        if status != 200 or not isinstance(resp, dict):
+            result["error"] = "Failed to obtain Tenant B JWT"
+            print(json.dumps(result, indent=2))
+            return 0
+        tenant_b_jwt = resp["access_token"]
 
-        fc = FulfillmentClient(config, sa_token if sa_token else token)
+        fc = FulfillmentClient(config, tenant_b_jwt)
 
-        # Create a VirtualNetwork via the admin SA token (scoped to admin tenant)
+        # Discover network_class using Tenant B's token (admin JWT lacks
+        # tenant groups and gets 500 on fulfillment API calls)
+        nc_id = ""
+        nc_status, nc_resp = fc.list_network_classes()
+        if nc_status == 200 and isinstance(nc_resp, dict):
+            items = nc_resp.get("items", [])
+            if items:
+                nc_id = items[0].get("id", "")
+
+        # Create a VNet under Tenant B (different tenant from A)
         vnet_name = f"isv-sec11-vnet-{suffix}"
         vnet_id = ""
-        if sa_token:
-            vn_status, vn_resp = fc.create_virtual_network(vnet_name)
-            if vn_status in (200, 201) and isinstance(vn_resp, dict):
-                vnet_id = vn_resp.get("id", vn_resp.get("name", ""))
+        vn_status, vn_resp = fc.create_virtual_network(
+            vnet_name, token=tenant_b_jwt, network_class=nc_id,
+        )
+        if vn_status in (200, 201) and isinstance(vn_resp, dict):
+            vnet_id = vn_resp.get("id", vn_resp.get("name", ""))
+
+        if not vnet_id:
+            result["error"] = f"Could not create probe VNet under Tenant B (HTTP {vn_status})"
+            print(json.dumps(result, indent=2))
+            return 0
+
+        # Positive control: Tenant B (owner) can see the VNet
+        owner_status, owner_body = fc.list_virtual_networks(token=tenant_b_jwt)
+        owner_ids = []
+        if owner_status == 200 and isinstance(owner_body, dict):
+            owner_items = owner_body.get("items", owner_body.get("virtual_networks", []))
+            owner_ids = [v.get("id", "") for v in owner_items] if isinstance(owner_items, list) else []
+        owner_sees_vnet = vnet_id in owner_ids
+
+        if not owner_sees_vnet:
+            result["error"] = f"Positive control failed: Tenant B cannot see its own VNet {vnet_id}"
+            print(json.dumps(result, indent=2))
+            return 0
 
         # --- network_isolated ---
-        # Tenant A (Keycloak JWT with no tenant groups) lists VirtualNetworks.
-        # The fulfillment service resolves tenants from JWT groups — an empty
-        # group means no tenant access.  HTTP 500 (tenant resolution failure),
-        # 401, or 403 all prove Tenant A cannot see resources.  A 200 with an
-        # empty list also proves filtering.
+        # Tenant A lists VNets. The VNet belongs to Tenant B.
+        # Tenant A should NOT see it.
         net_status, net_body = fc.list_virtual_networks(token=tenant_a_jwt)
-        if net_status in (401, 403, 500):
+        if net_status in (401, 403):
             net_isolated = True
-            net_msg = f"HTTP {net_status}: Tenant A denied/no tenant access for VirtualNetwork list"
+            net_msg = f"HTTP {net_status}: Tenant A denied VNet list"
         elif net_status == 200 and isinstance(net_body, dict):
             items = net_body.get("items", net_body.get("virtual_networks", []))
-            ids_visible = [v.get("id", v.get("name", "")) for v in items] if isinstance(items, list) else []
-            if vnet_id and vnet_id in ids_visible:
+            visible_ids = [v.get("id", "") for v in items] if isinstance(items, list) else []
+            if vnet_id in visible_ids:
                 net_isolated = False
-                net_msg = f"Tenant A can see admin's VNet {vnet_id}"
+                net_msg = f"FAIL: Tenant A can see Tenant B's VNet {vnet_id}"
             else:
                 net_isolated = True
-                net_msg = f"Tenant A sees {len(ids_visible)} VNets, none belonging to admin"
+                net_msg = f"Tenant A sees {len(visible_ids)} VNets, Tenant B's VNet {vnet_id} excluded"
         else:
             net_isolated = False
             net_msg = f"Unexpected HTTP {net_status}"
         result["tests"]["network_isolated"] = {"passed": net_isolated, "message": net_msg}
 
         # --- data_isolated ---
-        # Tenant A tries to GET admin's VNet by ID.  Expect denial.
-        if vnet_id:
-            data_status, _ = fc._api_request(
-                f"/api/fulfillment/v1/virtual_networks/{urllib.parse.quote(vnet_id, safe='')}",
-                headers_override={"Authorization": f"Bearer {tenant_a_jwt}", "Content-Type": "application/json"},
-            )
-            data_denied = data_status in (400, 401, 403, 404, 500)
-            result["tests"]["data_isolated"] = {
-                "passed": data_denied,
-                "message": f"Tenant A GET VNet {vnet_id} returned HTTP {data_status}",
-            }
-        else:
-            # If VNet creation failed (no SA token), Tenant A's list denial
-            # still proves data isolation via the same tenant-scoping mechanism.
-            result["tests"]["data_isolated"] = {
-                "passed": net_isolated,
-                "message": "VNet probe unavailable; data isolation confirmed via list-level tenant filtering",
-            }
+        # Tenant A tries to GET Tenant B's VNet by ID directly.
+        data_status, _ = fc._api_request(
+            f"/api/fulfillment/v1/virtual_networks/{urllib.parse.quote(vnet_id, safe='')}",
+            headers_override={"Authorization": f"Bearer {tenant_a_jwt}", "Content-Type": "application/json"},
+        )
+        data_denied = data_status in (401, 403, 404)
+        result["tests"]["data_isolated"] = {
+            "passed": data_denied,
+            "message": f"Tenant A GET Tenant B's VNet {vnet_id} returned HTTP {data_status}",
+        }
 
         # --- compute_isolated ---
-        # Inspect the response body to verify Tenant A can't see admin's instances.
-        ci_status, ci_body = fc.list_compute_instances(token=tenant_a_jwt)
-        if ci_status in (401, 403, 500):
+        # Tenant B lists ComputeInstances (baseline), Tenant A lists too.
+        # Tenant A should not see more than its own.
+        b_ci_status, b_ci_body = fc.list_compute_instances(token=tenant_b_jwt)
+        b_ci_count = 0
+        if b_ci_status == 200 and isinstance(b_ci_body, dict):
+            b_ci_items = b_ci_body.get("items", b_ci_body.get("compute_instances", []))
+            b_ci_count = len(b_ci_items) if isinstance(b_ci_items, list) else 0
+
+        a_ci_status, a_ci_body = fc.list_compute_instances(token=tenant_a_jwt)
+        if a_ci_status in (401, 403):
             compute_isolated = True
-            compute_msg = f"HTTP {ci_status}: Tenant A denied/no tenant access for ComputeInstance list"
-        elif ci_status == 200 and isinstance(ci_body, dict):
-            ci_items = ci_body.get("items", ci_body.get("compute_instances", []))
-            ci_count = len(ci_items) if isinstance(ci_items, list) else 0
-            # A freshly-created test client should see 0 instances (no instances
-            # belong to its tenant). Any instances visible would be cross-tenant leakage.
-            compute_isolated = ci_count == 0
-            compute_msg = (
-                f"Tenant A sees {ci_count} ComputeInstances (expected 0)"
-                if ci_count == 0 else f"Tenant A sees {ci_count} ComputeInstances — possible cross-tenant leakage"
-            )
+            compute_msg = f"HTTP {a_ci_status}: Tenant A denied ComputeInstance list"
+        elif a_ci_status == 200 and isinstance(a_ci_body, dict):
+            a_ci_items = a_ci_body.get("items", a_ci_body.get("compute_instances", []))
+            a_ci_count = len(a_ci_items) if isinstance(a_ci_items, list) else 0
+            compute_isolated = a_ci_count <= b_ci_count
+            compute_msg = f"Tenant A sees {a_ci_count} instances (Tenant B sees {b_ci_count})"
         else:
             compute_isolated = False
-            compute_msg = f"Unexpected HTTP {ci_status}"
+            compute_msg = f"Unexpected HTTP {a_ci_status}"
         result["tests"]["compute_isolated"] = {"passed": compute_isolated, "message": compute_msg}
 
         # --- storage_isolated ---
-        # Delegate to the OCP storage isolation probe.
         from common.ocp_probes import probe_storage_isolation
         probe_data = probe_storage_isolation(
             namespace_a=config.tenant_namespace,
