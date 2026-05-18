@@ -77,4 +77,10 @@ commands:
         timeout: 30
 
 tests:
-  description: "OSAC GPU cluster validation (OCP)"
+  description: "OSAC cluster validation (OCP)"
+
+  # Exclude GPU-dependent tests. K8sGpuOperatorNamespaceCheck and
+  # K8sGpuOperatorPodsCheck are missing the gpu marker upstream —
+  # they will fail on non-GPU clusters until the marker is added.
+  exclude:
+    markers: ["gpu"]
