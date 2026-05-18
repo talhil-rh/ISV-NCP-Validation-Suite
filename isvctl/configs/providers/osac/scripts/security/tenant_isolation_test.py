@@ -63,11 +63,6 @@ from common.osac_client import (
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 
 
-def _is_denied(status: int) -> bool:
-    """Return True if the HTTP status indicates access denied or empty result."""
-    return status in (401, 403, 404) or status >= 400
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Tenant isolation test (OSAC)")
     parser.add_argument("--region", default="osac-default")
@@ -281,8 +276,12 @@ def main() -> int:
         elif a_ci_status == 200 and isinstance(a_ci_body, dict):
             a_ci_items = a_ci_body.get("items", a_ci_body.get("compute_instances", []))
             a_ci_count = len(a_ci_items) if isinstance(a_ci_items, list) else 0
-            compute_isolated = a_ci_count <= b_ci_count
-            compute_msg = f"Tenant A sees {a_ci_count} instances (Tenant B sees {b_ci_count})"
+            if a_ci_count == 0 and b_ci_count == 0:
+                compute_isolated = True
+                compute_msg = "Both tenants see 0 instances (no instances to test cross-tenant visibility — vacuous pass)"
+            else:
+                compute_isolated = a_ci_count <= b_ci_count
+                compute_msg = f"Tenant A sees {a_ci_count} instances (Tenant B sees {b_ci_count})"
         else:
             compute_isolated = False
             compute_msg = f"Unexpected HTTP {a_ci_status}"
