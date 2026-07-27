@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for network DDI validations (DHCP/IP management)."""
+"""Tests for network validations (VPC/subnet/SG CRUD, isolation, blocking, DDI)."""
 
 from __future__ import annotations
 

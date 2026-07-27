@@ -1,0 +1,201 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OSAC Network Validation Configuration
+#
+# Imports validations from the provider-agnostic network canonical config.
+# This file provides OSAC-specific commands (fulfillment-service VirtualNetwork,
+# Subnet, and SecurityGroup APIs).
+#
+# Ephemeral tenants are registered via the fulfillment-service Tenants
+# gRPC API (not exposed on the REST gateway, so this requires the
+# `grpcurl` CLI). Registration triggers osac-operator to auto-provision a
+# matching Kubernetes Tenant CRD and labeled namespace within seconds.
+# Fulfillment API calls then authenticate as the Kubernetes ServiceAccount
+# in that namespace, not via Keycloak: the fulfillment-service gRPC server
+# trusts the in-cluster Kubernetes API server as a JWT issuer and resolves
+# the tenant from the SA token's `system:serviceaccount:<namespace>:<name>`
+# subject. This sidesteps the Keycloak Organizations feature (which
+# service accounts cannot join) that would otherwise be required to
+# populate the `organization` JWT claim for regular Keycloak tokens.
+#
+# Currently implemented:
+#   SDN01-01..04: VPC (VirtualNetwork) CRUD (VpcCrudCheck)
+#   SDN02-01..04: SecurityGroup CRUD (SgCrudCheck)
+#   SDN04-02:     VPC isolation (VpcIsolationCheck)
+#   N/A:          Network provisioned (NetworkProvisionedCheck)
+#   N/A:          Subnet configuration (SubnetConfigCheck)
+#   N/A:          Security blocking (SecurityBlockingCheck)
+#
+# Deferred (need OCP pod connectivity probes — follow-up PR):
+#   SDN02-05..09: SG scoping (workload/node/subnet/service)
+#   SDN02-10:     SG port security policy
+#   SDN02-08:     SG policy propagation timing
+#
+# Not applicable to OSAC:
+#   NET01-01, NET02-02: Physical fabric (BackendSwitchFabric, NvlinkDomain)
+#   SDN08-01:   Storage L3 routing (physical storage network)
+#   SDN09-01..03: SDN hardware logging (no physical SDN controller)
+#   NET03-01:   BYOIP (not available in OSAC)
+#   SDN05-01:   Floating IP (requires compute instances)
+#   SDN06-01:   Localized DNS (not available in OSAC)
+#   SDN07-01:   VPC peering (not available in OSAC)
+#   SDN11-01, DMS05-01: Stable IP checks (require compute instances)
+#   IPAM01-01:  DHCP/IP management (requires SSH to instances)
+#   IPAM02-01:  VPC IP config (DHCP options not exposed)
+#   N/A:        Connectivity / traffic flow (require compute instances)
+#
+# Usage:
+#   uv run isvctl test run -f isvctl/configs/providers/osac/config/network.yaml
+#
+# Required Environment Variables:
+#   OSAC_KEYCLOAK_URL, OSAC_KEYCLOAK_REALM,
+#   OSAC_ADMIN_CLIENT_ID, OSAC_ADMIN_CLIENT_SECRET (a Keycloak client with
+#     fulfillment-service admin privileges — an "emergency service account"
+#     per the gRPC server's --emergency-service-accounts flag. This is NOT
+#     the ephemeral, Keycloak-realm-management-scoped client that
+#     bootstrap_admin.py creates for other OSAC domains.)
+#   OSAC_FULFILLMENT_GRPC_ADDRESS (host:port of the fulfillment gRPC server,
+#     used to reach the Tenants API, which is not exposed on the REST
+#     gateway)
+#   Optional: OSAC_FULFILLMENT_URL, OSAC_VERIFY_SSL (default "true"),
+#             OSAC_TENANT_NAMESPACE (default "osac-e2e-ci"),
+#             ISVCTL_DEMO_MODE
+#
+# Requires the `grpcurl` CLI on PATH, and a kubectl/oc context with
+# permission to get Tenant CRDs and mint ServiceAccount tokens in
+# ephemeral tenant namespaces.
+
+import:
+  - ../../../suites/network.yaml
+
+version: "1.0"
+
+commands:
+  network:
+    phases: ["setup", "test", "teardown"]
+    steps:
+      # =======================================================================
+      # SETUP: Create ephemeral tenant for network tests
+      # =======================================================================
+      - name: setup_tenant
+        phase: setup
+        command: "python3 ../scripts/network/setup_tenant.py"
+        args:
+          - "--region"
+          - "{{region}}"
+        timeout: 60
+
+      # =======================================================================
+      # SETUP: Create shared VNet + subnets
+      # =======================================================================
+      - name: create_network
+        phase: setup
+        command: "python3 ../scripts/network/create_network.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 600
+
+      # =======================================================================
+      # TEST: VPC (VirtualNetwork) CRUD (SDN01-01..04)
+      # =======================================================================
+      - name: vpc_crud
+        phase: test
+        command: "python3 ../scripts/network/vpc_crud_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 400
+
+      # =======================================================================
+      # TEST: Subnet configuration
+      # =======================================================================
+      - name: subnet_config
+        phase: test
+        command: "python3 ../scripts/network/subnet_config_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 400
+
+      # =======================================================================
+      # TEST: VPC isolation (SDN04-02)
+      # =======================================================================
+      - name: vpc_isolation
+        phase: test
+        command: "python3 ../scripts/network/vpc_isolation_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+        timeout: 300
+
+      # =======================================================================
+      # TEST: SecurityGroup CRUD (SDN02-01..04)
+      # =======================================================================
+      - name: sg_crud
+        phase: test
+        command: "python3 ../scripts/network/sg_crud_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 400
+
+      # =======================================================================
+      # TEST: Security blocking (default-deny SG)
+      # =======================================================================
+      - name: security_blocking
+        phase: test
+        command: "python3 ../scripts/network/security_blocking_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 400
+
+      # =======================================================================
+      # TEARDOWN: Cleanup ephemeral tenant and network resources
+      # =======================================================================
+      - name: teardown
+        phase: teardown
+        command: "python3 ../scripts/network/teardown.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-name"
+          - "{{steps.setup_tenant.tenant_name}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 120
+        output_schema: teardown
+
+tests:
+  cluster_name: "osac-network-validation"
+  description: "OSAC network: VNet CRUD, subnets, SecurityGroup lifecycle, tenant isolation"
+
+  settings:
+    region: "osac-default"
+
+  exclude:
+    labels: ["ssh"]

@@ -28,12 +28,12 @@ import os
 import shutil
 import ssl
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -50,6 +50,7 @@ class OsacConfig:
     admin_client_secret: str
     verify_ssl: bool
     fulfillment_url: str = ""
+    fulfillment_grpc_address: str = ""
     tenant_namespace: str = "osac-e2e-ci"
 
 
@@ -93,6 +94,7 @@ def get_env_config(
         admin_client_secret=csecret,
         verify_ssl=verify_ssl,
         fulfillment_url=os.environ.get("OSAC_FULFILLMENT_URL", "").rstrip("/"),
+        fulfillment_grpc_address=os.environ.get("OSAC_FULFILLMENT_GRPC_ADDRESS", ""),
         tenant_namespace=os.environ.get("OSAC_TENANT_NAMESPACE", "osac-e2e-ci"),
     )
 
@@ -143,6 +145,39 @@ def _request(
             return exc.code, raw
 
 
+def grpcurl_call(
+    address: str,
+    method: str,
+    data: dict[str, Any],
+    token: str,
+    *,
+    verify_ssl: bool = True,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Invoke a gRPC method via the ``grpcurl`` CLI. Returns the parsed JSON response.
+
+    Some private fulfillment-service resources (e.g. Tenants) are registered
+    on the gRPC server but not wired into the REST gateway, so they are only
+    reachable over gRPC. Raises ``RuntimeError`` with the grpcurl stderr
+    output on failure.
+    """
+    cmd = ["grpcurl"]
+    if not verify_ssl:
+        cmd.append("-insecure")
+    cmd += [
+        "-H",
+        f"Authorization: Bearer {token}",
+        "-d",
+        json.dumps(data),
+        address,
+        method,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(f"grpcurl {method} failed: {result.stderr.strip()}")
+    return json.loads(result.stdout) if result.stdout.strip() else {}
+
+
 # ---------------------------------------------------------------------------
 # Token helpers
 # ---------------------------------------------------------------------------
@@ -174,9 +209,7 @@ def get_admin_token(config: OsacConfig) -> str:
     return resp["access_token"]
 
 
-def authenticate_with_client_credentials(
-    config: OsacConfig, client_id: str, client_secret: str
-) -> dict[str, Any]:
+def authenticate_with_client_credentials(config: OsacConfig, client_id: str, client_secret: str) -> dict[str, Any]:
     """Attempt ``client_credentials`` grant with *test* client creds.
 
     Returns ``{"success": True, "sub": "..."}`` on success,
@@ -241,9 +274,7 @@ class KeycloakAdmin:
 
     def __init__(self, config: OsacConfig, token: str) -> None:
         self._config = config
-        self._base = (
-            f"{config.keycloak_url}/admin/realms/{config.keycloak_realm}"
-        )
+        self._base = f"{config.keycloak_url}/admin/realms/{config.keycloak_realm}"
         self._headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -481,7 +512,11 @@ class FulfillmentClient:
         return self._api_request("/api/fulfillment/v1/network_classes", headers_override=hdrs)
 
     def create_virtual_network(
-        self, name: str, token: str | None = None, network_class: str = ""
+        self,
+        name: str,
+        token: str | None = None,
+        network_class: str = "",
+        ipv4_cidr: str = "10.200.0.0/16",
     ) -> tuple[int, Any]:
         """Attempt to create a virtual network. Returns ``(status, body)``.
 
@@ -492,7 +527,7 @@ class FulfillmentClient:
         hdrs = dict(self._headers)
         if token:
             hdrs["Authorization"] = f"Bearer {token}"
-        spec: dict[str, Any] = {"ipv4_cidr": "10.200.0.0/16"}
+        spec: dict[str, Any] = {"ipv4_cidr": ipv4_cidr}
         if network_class:
             spec["network_class"] = network_class
         payload = json.dumps({"metadata": {"name": name}, "spec": spec}).encode()
@@ -527,6 +562,186 @@ class FulfillmentClient:
             headers_override=hdrs,
         )
 
+    # --- VirtualNetwork extended CRUD ---
+
+    def get_virtual_network(self, name: str, token: str | None = None) -> tuple[int, Any]:
+        """GET a single VirtualNetwork by name."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(name, safe="")
+        return self._api_request(
+            f"/api/fulfillment/v1/virtual_networks/{encoded}",
+            headers_override=hdrs,
+        )
+
+    def update_virtual_network(
+        self,
+        name: str,
+        update_mask: str,
+        data: dict[str, Any],
+        token: str | None = None,
+    ) -> tuple[int, Any]:
+        """PATCH a VirtualNetwork with ``update_mask``."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(name, safe="")
+        mask = urllib.parse.quote(update_mask, safe="")
+        payload = json.dumps(data).encode()
+        return self._api_request(
+            f"/api/fulfillment/v1/virtual_networks/{encoded}?update_mask={mask}",
+            method="PATCH",
+            data=payload,
+            headers_override=hdrs,
+        )
+
+    def delete_virtual_network(self, name: str, token: str | None = None) -> tuple[int, Any]:
+        """DELETE a VirtualNetwork by name."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(name, safe="")
+        return self._api_request(
+            f"/api/fulfillment/v1/virtual_networks/{encoded}",
+            method="DELETE",
+            headers_override=hdrs,
+        )
+
+    # --- Subnet CRUD ---
+
+    def list_subnets(self, token: str | None = None) -> tuple[int, Any]:
+        """List subnets."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        return self._api_request("/api/fulfillment/v1/subnets", headers_override=hdrs)
+
+    def create_subnet(
+        self,
+        name: str,
+        virtual_network: str,
+        ipv4_cidr: str,
+        token: str | None = None,
+    ) -> tuple[int, Any]:
+        """Create a Subnet under a VirtualNetwork."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        payload = json.dumps(
+            {
+                "metadata": {"name": name},
+                "spec": {"virtual_network": virtual_network, "ipv4_cidr": ipv4_cidr},
+            }
+        ).encode()
+        return self._api_request(
+            "/api/fulfillment/v1/subnets",
+            method="POST",
+            data=payload,
+            headers_override=hdrs,
+        )
+
+    def get_subnet(self, name: str, token: str | None = None) -> tuple[int, Any]:
+        """GET a single Subnet by name."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(name, safe="")
+        return self._api_request(
+            f"/api/fulfillment/v1/subnets/{encoded}",
+            headers_override=hdrs,
+        )
+
+    def delete_subnet(self, name: str, token: str | None = None) -> tuple[int, Any]:
+        """DELETE a Subnet by name."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(name, safe="")
+        return self._api_request(
+            f"/api/fulfillment/v1/subnets/{encoded}",
+            method="DELETE",
+            headers_override=hdrs,
+        )
+
+    # --- SecurityGroup CRUD ---
+
+    def list_security_groups(self, token: str | None = None) -> tuple[int, Any]:
+        """List SecurityGroups."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        return self._api_request("/api/fulfillment/v1/security_groups", headers_override=hdrs)
+
+    def create_security_group(
+        self,
+        name: str,
+        virtual_network: str,
+        ingress: list[dict[str, Any]] | None = None,
+        egress: list[dict[str, Any]] | None = None,
+        token: str | None = None,
+    ) -> tuple[int, Any]:
+        """Create a SecurityGroup with ingress/egress rules."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        spec: dict[str, Any] = {"virtual_network": virtual_network}
+        if ingress is not None:
+            spec["ingress"] = ingress
+        if egress is not None:
+            spec["egress"] = egress
+        payload = json.dumps({"metadata": {"name": name}, "spec": spec}).encode()
+        return self._api_request(
+            "/api/fulfillment/v1/security_groups",
+            method="POST",
+            data=payload,
+            headers_override=hdrs,
+        )
+
+    def get_security_group(self, name: str, token: str | None = None) -> tuple[int, Any]:
+        """GET a single SecurityGroup by name."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(name, safe="")
+        return self._api_request(
+            f"/api/fulfillment/v1/security_groups/{encoded}",
+            headers_override=hdrs,
+        )
+
+    def update_security_group(
+        self,
+        name: str,
+        update_mask: str,
+        data: dict[str, Any],
+        token: str | None = None,
+    ) -> tuple[int, Any]:
+        """PATCH a SecurityGroup (e.g. update ingress/egress rules)."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(name, safe="")
+        mask = urllib.parse.quote(update_mask, safe="")
+        payload = json.dumps(data).encode()
+        return self._api_request(
+            f"/api/fulfillment/v1/security_groups/{encoded}?update_mask={mask}",
+            method="PATCH",
+            data=payload,
+            headers_override=hdrs,
+        )
+
+    def delete_security_group(self, name: str, token: str | None = None) -> tuple[int, Any]:
+        """DELETE a SecurityGroup by name."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(name, safe="")
+        return self._api_request(
+            f"/api/fulfillment/v1/security_groups/{encoded}",
+            method="DELETE",
+            headers_override=hdrs,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tenant CRD (kubectl)
@@ -549,10 +764,53 @@ def _run_kubectl(args: list[str], config: OsacConfig) -> str:
     cmd = [_kubectl()] + args + ["-n", config.tenant_namespace]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
-        raise RuntimeError(
-            f"kubectl failed (rc={result.returncode}): {result.stderr.strip()}"
-        )
+        raise RuntimeError(f"kubectl failed (rc={result.returncode}): {result.stderr.strip()}")
     return result.stdout
+
+
+def wait_crd_ready(
+    kind: str,
+    fulfillment_id: str,
+    namespace: str,
+    label: str = "",
+    timeout: int = 300,
+    interval: int = 2,
+) -> dict[str, Any]:
+    """Poll a K8s CRD until ``.status.phase`` is ``Ready``.
+
+    The fulfillment REST API does not reliably expose resource readiness,
+    so we poll the underlying ``osac.openshift.io/v1alpha1`` CRD directly.
+
+    When *label* is provided, the resource is found via
+    ``-l <label>=<fulfillment_id>``; otherwise *fulfillment_id* is used as
+    the CRD ``metadata.name``.
+    """
+    kubectl = _kubectl()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if label:
+            cmd = [kubectl, "get", kind, "-n", namespace, "-l", f"{label}={fulfillment_id}", "-o", "json"]
+        else:
+            cmd = [kubectl, "get", kind, fulfillment_id, "-n", namespace, "-o", "json"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            time.sleep(interval)
+            continue
+        body = json.loads(result.stdout)
+        if label:
+            items = body.get("items", [])
+            if not items:
+                time.sleep(interval)
+                continue
+            body = items[0]
+        phase = body.get("status", {}).get("phase", "")
+        if phase == "Ready":
+            return body
+        if phase == "Failed":
+            msg = body.get("status", {}).get("message", "")
+            raise RuntimeError(f"{kind}/{fulfillment_id} Failed: {msg}")
+        time.sleep(interval)
+    raise RuntimeError(f"{kind}/{fulfillment_id} not Ready within {timeout}s")
 
 
 class TenantClient:
@@ -593,9 +851,7 @@ class TenantClient:
             timeout=30,
         )
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to create tenant '{name}': {result.stderr.strip()}"
-            )
+            raise RuntimeError(f"Failed to create tenant '{name}': {result.stderr.strip()}")
         return json.loads(result.stdout)
 
     def list(self) -> list[dict[str, Any]]:
@@ -842,9 +1098,12 @@ def decode_jwt_payload(token: str) -> dict[str, Any]:
     return json.loads(_b64url_decode(parts[1]))
 
 
-def craft_jwt(token: str, payload_overrides: dict[str, Any] | None = None,
-              remove_claims: list[str] | None = None,
-              corrupt_signature: bool = False) -> str:
+def craft_jwt(
+    token: str,
+    payload_overrides: dict[str, Any] | None = None,
+    remove_claims: list[str] | None = None,
+    corrupt_signature: bool = False,
+) -> str:
     """Re-encode a JWT with modified payload or corrupted signature.
 
     Used for negative OIDC testing. The resulting token will have an
@@ -860,7 +1119,7 @@ def craft_jwt(token: str, payload_overrides: dict[str, Any] | None = None,
 
     if payload_overrides:
         payload.update(payload_overrides)
-    for claim in (remove_claims or []):
+    for claim in remove_claims or []:
         payload.pop(claim, None)
 
     new_payload = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
@@ -884,8 +1143,7 @@ def create_sa_token(namespace: str, sa_name: str, duration: str = "3600s") -> tu
     Returns ``(token_string, ttl_seconds)``.
     """
     kctl = _kubectl()
-    cmd = [kctl, "create", "token", sa_name, "-n", namespace,
-           f"--duration={duration}", "--output=json"]
+    cmd = [kctl, "create", "token", sa_name, "-n", namespace, f"--duration={duration}", "--output=json"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         raise RuntimeError(f"kubectl create token failed: {result.stderr.strip()}")
