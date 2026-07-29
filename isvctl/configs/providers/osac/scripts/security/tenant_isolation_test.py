@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tenant isolation test for OSAC (SEC11-01).
 
@@ -152,11 +157,13 @@ def main() -> int:
         admin.add_user_to_group(sa_user_b["id"], group_b["id"])
 
         # Get Tenant A's JWT (groups: [isv-test-tenant])
-        body_a = urllib.parse.urlencode({
-            "grant_type": "client_credentials",
-            "client_id": client_a_id,
-            "client_secret": secret_a,
-        }).encode()
+        body_a = urllib.parse.urlencode(
+            {
+                "grant_type": "client_credentials",
+                "client_id": client_a_id,
+                "client_secret": secret_a,
+            }
+        ).encode()
         status, resp = _request(
             _token_endpoint(config),
             method="POST",
@@ -171,11 +178,13 @@ def main() -> int:
         tenant_a_jwt = resp["access_token"]
 
         # Get Tenant B's JWT (groups: [isv-test-tenant-b])
-        body_b = urllib.parse.urlencode({
-            "grant_type": "client_credentials",
-            "client_id": client_b_id,
-            "client_secret": secret_b,
-        }).encode()
+        body_b = urllib.parse.urlencode(
+            {
+                "grant_type": "client_credentials",
+                "client_id": client_b_id,
+                "client_secret": secret_b,
+            }
+        ).encode()
         status, resp = _request(
             _token_endpoint(config),
             method="POST",
@@ -204,7 +213,9 @@ def main() -> int:
         vnet_name = f"isv-sec11-vnet-{suffix}"
         vnet_id = ""
         vn_status, vn_resp = fc.create_virtual_network(
-            vnet_name, token=tenant_b_jwt, network_class=nc_id,
+            vnet_name,
+            token=tenant_b_jwt,
+            network_class=nc_id,
         )
         if vn_status in (200, 201) and isinstance(vn_resp, dict):
             vnet_id = vn_resp.get("id", vn_resp.get("name", ""))
@@ -278,7 +289,9 @@ def main() -> int:
             a_ci_count = len(a_ci_items) if isinstance(a_ci_items, list) else 0
             if a_ci_count == 0 and b_ci_count == 0:
                 compute_isolated = True
-                compute_msg = "Both tenants see 0 instances (no instances to test cross-tenant visibility — vacuous pass)"
+                compute_msg = (
+                    "Both tenants see 0 instances (no instances to test cross-tenant visibility — vacuous pass)"
+                )
             else:
                 compute_isolated = a_ci_count <= b_ci_count
                 compute_msg = f"Tenant A sees {a_ci_count} instances (Tenant B sees {b_ci_count})"
@@ -289,6 +302,7 @@ def main() -> int:
 
         # --- storage_isolated ---
         from common.ocp_probes import probe_storage_isolation
+
         probe_data = probe_storage_isolation(
             namespace_a=config.tenant_namespace,
             namespace_b="default",

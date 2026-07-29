@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """API endpoint isolation test for OSAC.
 
@@ -55,7 +60,9 @@ def _check_public_dns(hostname: str) -> bool:
     try:
         result = subprocess.run(
             ["dig", "+short", hostname, "@8.8.8.8"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return bool(result.stdout.strip())
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -125,7 +132,8 @@ def main() -> int:
             result["tests"]["probe_api_from_public"] = {
                 "passed": api_private,
                 "message": f"All {len(svc_data.get('items', []))} services are ClusterIP"
-                if api_private else f"Publicly exposed services: {', '.join(exposed_svcs)}",
+                if api_private
+                else f"Publicly exposed services: {', '.join(exposed_svcs)}",
             }
             result["endpoints_tested"] += len(svc_data.get("items", []))
         else:
@@ -150,7 +158,8 @@ def main() -> int:
             result["tests"]["probe_mgmt_from_public"] = {
                 "passed": mgmt_secure,
                 "message": f"All {len(route_data.get('items', []))} routes have TLS configured"
-                if mgmt_secure else f"Routes without TLS: {', '.join(insecure_routes)}",
+                if mgmt_secure
+                else f"Routes without TLS: {', '.join(insecure_routes)}",
             }
             result["endpoints_tested"] += len(route_data.get("items", []))
         else:
@@ -161,16 +170,20 @@ def main() -> int:
 
         # verify_private_only: Verify the OCP default ingress controller
         # is not set to publish a public LoadBalancer with external IPs.
-        ic_cmd = [kctl, "get", "ingresscontrollers.operator.openshift.io",
-                  "default", "-n", "openshift-ingress-operator", "-o", "json"]
+        ic_cmd = [
+            kctl,
+            "get",
+            "ingresscontrollers.operator.openshift.io",
+            "default",
+            "-n",
+            "openshift-ingress-operator",
+            "-o",
+            "json",
+        ]
         ic_result = subprocess.run(ic_cmd, capture_output=True, text=True, timeout=15)
         if ic_result.returncode == 0:
             ic_data = json.loads(ic_result.stdout)
-            endpoint_strategy = (
-                ic_data.get("spec", {})
-                .get("endpointPublishingStrategy", {})
-                .get("type", "")
-            )
+            endpoint_strategy = ic_data.get("spec", {}).get("endpointPublishingStrategy", {}).get("type", "")
             lb_scope = (
                 ic_data.get("spec", {})
                 .get("endpointPublishingStrategy", {})

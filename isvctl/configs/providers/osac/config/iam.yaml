@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OSAC IAM Validation Configuration
+#
+# Validates IAM credential lifecycle on OSAC: creates an ephemeral Keycloak
+# client (the "IAM user"), verifies its credentials can authenticate and reach
+# an authorized API resource, then deletes it.
+#
+# Maps:
+#   create_user   → create a Keycloak service-account client (access key)
+#   test_credentials → identity probe (client_credentials grant) +
+#                       access probe (Keycloak userinfo endpoint)
+#   teardown      → delete the ephemeral client
+#
+# Usage:
+#   uv run isvctl test run -f isvctl/configs/providers/osac/config/iam.yaml
+#
+# Required Environment Variables:
+#   OSAC_KEYCLOAK_URL, OSAC_KEYCLOAK_REALM,
+#   OSAC_ADMIN_CLIENT_ID, OSAC_ADMIN_CLIENT_SECRET,
+#   Optional: OSAC_VERIFY_SSL (default "true"), ISVCTL_DEMO_MODE
+
+import:
+  - ../../../suites/iam.yaml
+
+version: "1.0"
+
+commands:
+  iam:
+    phases: ["setup", "test", "teardown"]
+    steps:
+      # =====================================================================
+      # SETUP: Create ephemeral Keycloak client (IAM user)
+      # =====================================================================
+      - name: create_user
+        phase: setup
+        command: "python3 ../scripts/iam/create_iam_user.py"
+        timeout: 60
+
+      # =====================================================================
+      # TEST: Verify credential identity + resource access
+      # =====================================================================
+      - name: test_credentials
+        phase: test
+        command: "python3 ../scripts/iam/test_iam_credentials.py"
+        args:
+          - "--access-key-id"
+          - "{{steps.create_user.access_key_id}}"
+          - "--secret-access-key"
+          - "{{steps.create_user.secret_access_key}}"
+        sensitive_args: ["--secret-access-key"]
+        timeout: 30
+
+      # =====================================================================
+      # TEARDOWN: Delete ephemeral client
+      # =====================================================================
+      - name: teardown
+        phase: teardown
+        command: "python3 ../scripts/iam/teardown.py"
+        args:
+          - "--client-uuid"
+          - "{{steps.create_user.client_uuid}}"
+        timeout: 30
+        output_schema: teardown
+
+tests:
+  cluster_name: "osac-iam-validation"
+  description: "OSAC IAM: credential lifecycle (create / authenticate / access / delete)"

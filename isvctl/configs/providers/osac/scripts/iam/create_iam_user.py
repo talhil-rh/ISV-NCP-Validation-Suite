@@ -14,22 +14,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Create Keycloak OAuth2 client (access key equivalent).
+"""Create an ephemeral Keycloak client to act as an IAM user (IAM01-01).
 
-Creates a Keycloak client with service accounts enabled and retrieves
-its client secret. Maps to the IAM access-key lifecycle.
+Uses the permanent OSAC admin client credentials from the environment to create
+a new service-account-enabled Keycloak client. The client id/secret are the
+OSAC equivalent of an IAM user access key pair.
 
 Output JSON:
 {
     "success": true,
-    "platform": "control_plane",
-    "username": "isv-access-key-test-a1b2c3d4",
-    "access_key_id": "isv-access-key-test-a1b2c3d4",
-    "secret_access_key": "<client-secret>"
+    "platform": "iam",
+    "username": "isv-iam-user-<hex>",
+    "access_key_id": "isv-iam-user-<hex>",
+    "secret_access_key": "<client-secret>",
+    "client_uuid": "<keycloak-internal-uuid>"
 }
 """
 
-import argparse
 import json
 import os
 import sys
@@ -45,47 +46,37 @@ DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--region", default="osac-default")
-    parser.add_argument("--username-prefix", default="isv-access-key-test")
-    parser.add_argument("--admin-client-id", help="Bootstrapped admin client ID")
-    parser.add_argument("--admin-client-secret", help="Bootstrapped admin client secret")
-    args = parser.parse_args()
-
-    client_id = f"{args.username_prefix}-{uuid.uuid4().hex[:8]}"
+    client_id = f"isv-iam-user-{uuid.uuid4().hex[:8]}"
 
     result: dict[str, Any] = {
         "success": False,
-        "platform": "control_plane",
+        "platform": "iam",
         "username": client_id,
         "access_key_id": client_id,
     }
 
     if DEMO_MODE:
-        result["secret_access_key"] = "demo-secret-key-osac"
+        result["secret_access_key"] = "demo-iam-secret"
+        result["client_uuid"] = "demo-uuid-0000-0000-0000-000000000000"
         result["success"] = True
         print(json.dumps(result, indent=2))
         return 0
 
     try:
-        config = get_env_config(
-            admin_client_id=args.admin_client_id,
-            admin_client_secret=args.admin_client_secret,
-        )
+        config = get_env_config()
         token = get_admin_token(config)
         admin = KeycloakAdmin(config, token)
 
-        # Create Keycloak client
         client_rep = admin.create_client(client_id)
         client_uuid = client_rep["id"]
-
-        # Retrieve the generated client secret
         secret = admin.get_client_secret(client_uuid)
+
         result["secret_access_key"] = secret
+        result["client_uuid"] = client_uuid
         result["success"] = True
 
-    except Exception as e:
-        result["error"] = str(e)
+    except Exception as exc:
+        result["error"] = str(exc)
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

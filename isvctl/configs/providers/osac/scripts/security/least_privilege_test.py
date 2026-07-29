@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Least-privilege policy test for OSAC (SEC04-01 + SEC04-02).
 
@@ -134,11 +139,13 @@ def main() -> int:
         result["allowed_source_cidr"] = "cluster-internal"
 
         # Get token for the minimal client
-        body = urllib.parse.urlencode({
-            "grant_type": "client_credentials",
-            "client_id": test_client_id,
-            "client_secret": secret,
-        }).encode()
+        body = urllib.parse.urlencode(
+            {
+                "grant_type": "client_credentials",
+                "client_id": test_client_id,
+                "client_secret": secret,
+            }
+        ).encode()
         status, resp = _request(
             _token_endpoint(config),
             method="POST",
@@ -190,6 +197,7 @@ def main() -> int:
         # with the minimal Keycloak client (which has no tenant group).
         try:
             from common.osac_client import create_sa_token
+
             sa_token, _ = create_sa_token(config.tenant_namespace, "admin", "3600s")
             sa_list_status, _ = fc.list_virtual_networks(token=sa_token)
         except Exception:
@@ -215,6 +223,7 @@ def main() -> int:
         # This proves API access is gated, not open to any network caller.
         import shutil
         import subprocess
+
         kctl = shutil.which("kubectl") or shutil.which("oc") or ""
         namespace = config.tenant_namespace
         if kctl:
@@ -238,7 +247,8 @@ def main() -> int:
                 result["tests"]["policy_dimensions_network_based"] = {
                     "passed": network_ok,
                     "message": f"AuthConfig '{ac_name}' enforces authentication + authorization"
-                    if network_ok else "No AuthConfig with both authentication and authorization found",
+                    if network_ok
+                    else "No AuthConfig with both authentication and authorization found",
                 }
             else:
                 result["tests"]["policy_dimensions_network_based"] = {
@@ -266,6 +276,7 @@ def main() -> int:
 
         # storage_denied: Delegate to OCP storage isolation probe.
         from common.ocp_probes import probe_storage_isolation
+
         probe_data = probe_storage_isolation(
             namespace_a=config.tenant_namespace,
             namespace_b="default",

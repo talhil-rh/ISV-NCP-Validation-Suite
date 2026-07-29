@@ -1,12 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """OCP-native probes for security checks that the fulfillment API cannot reach.
 
@@ -29,6 +34,7 @@ from typing import Any
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _oc() -> str:
     path = shutil.which("oc")
     return path or ""
@@ -44,6 +50,7 @@ def _kubectl() -> str:
 # ---------------------------------------------------------------------------
 # Audit log probe
 # ---------------------------------------------------------------------------
+
 
 def probe_audit_log(namespace: str = "osac-e2e-ci") -> dict[str, Any]:
     """Create a probe ConfigMap and find it in the kube-apiserver audit log.
@@ -82,8 +89,17 @@ def probe_audit_log(namespace: str = "osac-e2e-ci") -> dict[str, Any]:
     probe_name = f"isv-audit-probe-{uuid.uuid4().hex[:8]}"
 
     try:
-        create_cmd = [kctl, "create", "configmap", probe_name,
-                      "--from-literal=probe=audit-test", "-n", namespace, "-o", "json"]
+        create_cmd = [
+            kctl,
+            "create",
+            "configmap",
+            probe_name,
+            "--from-literal=probe=audit-test",
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
         create_result = subprocess.run(create_cmd, capture_output=True, text=True, timeout=30)
         if create_result.returncode != 0:
             result["error"] = f"Could not create probe ConfigMap: {create_result.stderr.strip()}"
@@ -105,10 +121,7 @@ def probe_audit_log(namespace: str = "osac-e2e-ci") -> dict[str, Any]:
             result["username"] = audit_entry.get("user", {}).get("username", "")
             result["verb"] = audit_entry.get("verb", "")
             result["request_uri"] = audit_entry.get("requestURI", "")
-            result["timestamp"] = (
-                audit_entry.get("requestReceivedTimestamp")
-                or audit_entry.get("stageTimestamp", "")
-            )
+            result["timestamp"] = audit_entry.get("requestReceivedTimestamp") or audit_entry.get("stageTimestamp", "")
             result["namespace"] = audit_entry.get("objectRef", {}).get("namespace", namespace)
         else:
             result["error"] = f"Probe '{probe_name}' not found in {len(log_files)} audit log(s)"
@@ -117,7 +130,9 @@ def probe_audit_log(namespace: str = "osac-e2e-ci") -> dict[str, Any]:
     finally:
         subprocess.run(
             [kctl, "delete", "configmap", probe_name, "-n", namespace, "--ignore-not-found"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
 
     return result
@@ -153,11 +168,14 @@ def _search_audit_log(oc: str, log_file: str, resource_name: str, namespace: str
 
     oc_proc = subprocess.Popen(
         [oc, "adm", "node-logs", node_name, f"--path=kube-apiserver/{log_file}"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     grep_proc = subprocess.Popen(
         ["grep", resource_name],
-        stdin=oc_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=oc_proc.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     oc_proc.stdout.close()
     try:
@@ -180,9 +198,11 @@ def _search_audit_log(oc: str, log_file: str, resource_name: str, namespace: str
         except json.JSONDecodeError:
             continue
         obj_ref = entry.get("objectRef", {})
-        if (obj_ref.get("name") == resource_name
-                and obj_ref.get("namespace") == namespace
-                and entry.get("verb") == "create"):
+        if (
+            obj_ref.get("name") == resource_name
+            and obj_ref.get("namespace") == namespace
+            and entry.get("verb") == "create"
+        ):
             return entry
     return None
 
@@ -191,9 +211,8 @@ def _search_audit_log(oc: str, log_file: str, resource_name: str, namespace: str
 # Storage isolation probe
 # ---------------------------------------------------------------------------
 
-def probe_storage_isolation(
-    namespace_a: str, namespace_b: str, storage_class: str = ""
-) -> dict[str, Any]:
+
+def probe_storage_isolation(namespace_a: str, namespace_b: str, storage_class: str = "") -> dict[str, Any]:
     """Verify PVCs in namespace_a are not accessible from namespace_b.
 
     Returns a dict with ``storage_isolated``, ``storage_denied``,
@@ -222,7 +241,9 @@ def probe_storage_isolation(
         for ns in (namespace_a, namespace_b):
             check = subprocess.run(
                 [kctl, "get", "namespace", ns],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if check.returncode != 0:
                 result["error"] = f"Namespace '{ns}' not found"
@@ -243,23 +264,38 @@ def probe_storage_isolation(
         create = subprocess.run(
             [kctl, "apply", "-f", "-", "-o", "json"],
             input=json.dumps(pvc_spec),
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if create.returncode != 0:
             result["error"] = f"Could not create PVC in {namespace_a}: {create.stderr.strip()}"
             return result
 
         list_cross = subprocess.run(
-            [kctl, "get", "pvc", pvc_name, "-n", namespace_a,
-             "--as", f"system:serviceaccount:{namespace_b}:default",
-             "-o", "json"],
-            capture_output=True, text=True, timeout=10,
+            [
+                kctl,
+                "get",
+                "pvc",
+                pvc_name,
+                "-n",
+                namespace_a,
+                "--as",
+                f"system:serviceaccount:{namespace_b}:default",
+                "-o",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         cross_ns_denied = list_cross.returncode != 0
 
         list_same = subprocess.run(
             [kctl, "get", "pvc", pvc_name, "-n", namespace_a, "-o", "json"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         same_ns_visible = list_same.returncode == 0
 
@@ -267,13 +303,11 @@ def probe_storage_isolation(
             result["storage_isolated"] = True
             result["storage_denied"] = True
             result["message"] = (
-                f"PVC '{pvc_name}' in {namespace_a} visible to owner, "
-                f"denied to {namespace_b}:default SA"
+                f"PVC '{pvc_name}' in {namespace_a} visible to owner, denied to {namespace_b}:default SA"
             )
         elif not cross_ns_denied:
             result["message"] = (
-                f"PVC '{pvc_name}' in {namespace_a} is accessible from "
-                f"{namespace_b}:default SA — isolation failure"
+                f"PVC '{pvc_name}' in {namespace_a} is accessible from {namespace_b}:default SA — isolation failure"
             )
         else:
             result["message"] = (
@@ -287,7 +321,9 @@ def probe_storage_isolation(
     finally:
         subprocess.run(
             [kctl, "delete", "pvc", pvc_name, "-n", namespace_a, "--ignore-not-found"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
 
     return result

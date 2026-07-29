@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Audit logging test for OSAC (SEC08-01 + SEC08-02).
 
@@ -77,17 +82,18 @@ def _grpcurl() -> str:
     return path or ""
 
 
-def _watch_events(
-    endpoint: str, token: str, captured: list[dict[str, Any]], stop_event: threading.Event
-) -> None:
+def _watch_events(endpoint: str, token: str, captured: list[dict[str, Any]], stop_event: threading.Event) -> None:
     """Background thread: stream fulfillment Events via grpcurl."""
     grpcurl = _grpcurl()
     if not grpcurl:
         return
     cmd = [
-        grpcurl, "-insecure",
-        "-H", f"Authorization: Bearer {token}",
-        endpoint, "osac.private.v1.Events/Watch",
+        grpcurl,
+        "-insecure",
+        "-H",
+        f"Authorization: Bearer {token}",
+        endpoint,
+        "osac.private.v1.Events/Watch",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
@@ -186,10 +192,9 @@ def main() -> int:
         # The internal route is derived from the fulfillment URL by
         # replacing "fulfillment-api" with "fulfillment-internal-api".
         from urllib.parse import urlparse
+
         parsed = urlparse(config.fulfillment_url)
-        internal_host = (parsed.hostname or "").replace(
-            "fulfillment-api", "fulfillment-internal-api"
-        )
+        internal_host = (parsed.hostname or "").replace("fulfillment-api", "fulfillment-internal-api")
         grpc_endpoint = f"{internal_host}:{parsed.port or 443}"
 
         # ---------------------------------------------------------------
@@ -220,7 +225,8 @@ def main() -> int:
                 network_class = items[0].get("id", "")
 
         vn_status, vn_resp = fc.create_virtual_network(
-            probe_name, network_class=network_class,
+            probe_name,
+            network_class=network_class,
         )
 
         # Wait for the event to arrive
@@ -234,9 +240,16 @@ def main() -> int:
         # Find the event for our probe resource.
         # Private API wraps in {"event": {type, virtualNetwork, ...}}.
         probe_event = None
-        resource_keys = ("virtualNetwork", "virtual_network", "cluster",
-                         "computeInstance", "compute_instance",
-                         "subnet", "securityGroup", "security_group")
+        resource_keys = (
+            "virtualNetwork",
+            "virtual_network",
+            "cluster",
+            "computeInstance",
+            "compute_instance",
+            "subnet",
+            "securityGroup",
+            "security_group",
+        )
         for raw in captured_events:
             ev = raw.get("event", raw)
             for key in resource_keys:
@@ -283,34 +296,33 @@ def main() -> int:
             has_creator = len(creators) > 0
             result["tests"]["audit_log_user_identity_present"] = {
                 "passed": has_creator,
-                "message": f"Creators: {', '.join(creators)}" if has_creator
-                else "No creators in event metadata",
+                "message": f"Creators: {', '.join(creators)}" if has_creator else "No creators in event metadata",
             }
 
             # source IP and user agent: not available in fulfillment Events API.
             # Delegate to the OCP kube-apiserver audit log probe.
             from common.ocp_probes import probe_audit_log
+
             probe_data = probe_audit_log(namespace=args.namespace)
 
             source_ips = probe_data.get("source_ips", [])
             result["tests"]["audit_log_source_ip_present"] = {
                 "passed": len(source_ips) > 0,
-                "message": f"Source IPs: {', '.join(source_ips)}" if source_ips
+                "message": f"Source IPs: {', '.join(source_ips)}"
+                if source_ips
                 else probe_data.get("error", "No source IPs"),
             }
             user_agent = probe_data.get("user_agent", "")
             result["tests"]["audit_log_user_agent_matches"] = {
                 "passed": bool(user_agent),
-                "message": f"User agent: {user_agent}" if user_agent
-                else probe_data.get("error", "No user agent"),
+                "message": f"User agent: {user_agent}" if user_agent else probe_data.get("error", "No user agent"),
             }
 
             # region: tenants from metadata
             tenants = metadata.get("tenants", [])
             result["tests"]["audit_log_region_matches"] = {
                 "passed": len(tenants) > 0,
-                "message": f"Tenants: {', '.join(tenants)}" if tenants
-                else "No tenant scope in event",
+                "message": f"Tenants: {', '.join(tenants)}" if tenants else "No tenant scope in event",
             }
 
             # event source: verify the event identifies its source (the
@@ -340,6 +352,7 @@ def main() -> int:
             vnet_id = vn_resp.get("id", vn_resp.get("name", ""))
             if vnet_id:
                 import urllib.parse
+
                 fc._api_request(
                     f"/api/fulfillment/v1/virtual_networks/{urllib.parse.quote(vnet_id, safe='')}",
                     method="DELETE",
@@ -362,7 +375,8 @@ def main() -> int:
             result["tests"]["audit_log_trail_logging_enabled"] = {
                 "passed": logging_enabled,
                 "message": f"API server audit profile: {audit_profile}"
-                if logging_enabled else f"Audit profile is '{audit_profile}' (logging disabled)",
+                if logging_enabled
+                else f"Audit profile is '{audit_profile}' (logging disabled)",
             }
 
             custom_rules = audit_section.get("customRules", [])

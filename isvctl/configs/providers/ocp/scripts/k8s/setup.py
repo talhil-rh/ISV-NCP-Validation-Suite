@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """OCP K8s Inventory — query an existing OCP cluster and output inventory JSON.
 
@@ -44,15 +49,11 @@ def _kubectl() -> str:
 
 
 def _which(cmd: str) -> bool:
-    return subprocess.run(
-        ["which", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    ).returncode == 0
+    return subprocess.run(["which", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
 def _run(cmd: str, *, check: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, check=check
-    )
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True, check=check)
 
 
 def _run_json(cmd: str) -> Any:
@@ -68,6 +69,7 @@ def _run_json(cmd: str) -> Any:
 # ---------------------------------------------------------------------------
 # Inventory collectors
 # ---------------------------------------------------------------------------
+
 
 def _detect_api_endpoint(kc: str) -> str:
     r = _run(f"{kc} whoami --show-server")
@@ -187,6 +189,7 @@ def _csi_storage_classes(kc: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> int:
     kc = _kubectl()

@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """MFA enforcement test for OSAC (Keycloak).
 
@@ -121,7 +126,8 @@ def main() -> int:
         # all new users). If it's not, this is a real failure — MFA is not enforced.
         result["tests"]["root_mfa_enabled"] = {
             "passed": otp_default_action,
-            "message": "OTP is a default required action" if otp_default_action
+            "message": "OTP is a default required action"
+            if otp_default_action
             else "OTP is NOT a default required action — MFA not enforced for new users",
         }
         interfaces_checked += 1
@@ -143,7 +149,8 @@ def main() -> int:
             browser_has_otp = _check_otp_in_flow(executions)
             result["tests"]["console_users_mfa"] = {
                 "passed": browser_has_otp,
-                "message": "Browser flow has OTP subflow" if browser_has_otp
+                "message": "Browser flow has OTP subflow"
+                if browser_has_otp
                 else "Browser flow missing OTP requirement",
             }
         else:
@@ -183,8 +190,7 @@ def main() -> int:
         # which routes through the browser flow.
         result["tests"]["cli_mfa_policy"] = {
             "passed": browser_has_otp,
-            "message": "CLI routes through browser flow; OTP "
-            + ("enforced" if browser_has_otp else "NOT enforced"),
+            "message": "CLI routes through browser flow; OTP " + ("enforced" if browser_has_otp else "NOT enforced"),
         }
         interfaces_checked += 1
 
