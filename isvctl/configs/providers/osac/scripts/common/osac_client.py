@@ -50,6 +50,7 @@ class OsacConfig:
     admin_client_secret: str
     verify_ssl: bool
     fulfillment_url: str = ""
+    fulfillment_private_url: str = ""
     fulfillment_grpc_address: str = ""
     tenant_namespace: str = "osac-e2e-ci"
 
@@ -87,6 +88,14 @@ def get_env_config(
 
     verify_ssl = os.environ.get("OSAC_VERIFY_SSL", "true").lower() != "false"
 
+    grpc_addr = os.environ.get("OSAC_FULFILLMENT_GRPC_ADDRESS", "")
+    # Derive private REST URL from gRPC address (strip port, prepend https://).
+    # The private API (admin-only) lives on the same host as the gRPC server.
+    private_url = os.environ.get("OSAC_FULFILLMENT_PRIVATE_URL", "")
+    if not private_url and grpc_addr:
+        host = grpc_addr.rsplit(":", 1)[0]
+        private_url = f"https://{host}"
+
     return OsacConfig(
         keycloak_url=os.environ["OSAC_KEYCLOAK_URL"].rstrip("/"),
         keycloak_realm=os.environ["OSAC_KEYCLOAK_REALM"],
@@ -94,7 +103,8 @@ def get_env_config(
         admin_client_secret=csecret,
         verify_ssl=verify_ssl,
         fulfillment_url=os.environ.get("OSAC_FULFILLMENT_URL", "").rstrip("/"),
-        fulfillment_grpc_address=os.environ.get("OSAC_FULFILLMENT_GRPC_ADDRESS", ""),
+        fulfillment_private_url=private_url.rstrip("/"),
+        fulfillment_grpc_address=grpc_addr,
         tenant_namespace=os.environ.get("OSAC_TENANT_NAMESPACE", "osac-e2e-ci"),
     )
 
@@ -741,6 +751,222 @@ class FulfillmentClient:
             method="DELETE",
             headers_override=hdrs,
         )
+
+    # --- InstanceType (private admin API) ---
+
+    def create_instance_type(self, name: str, cores: int, memory_gib: int, admin_token: str) -> tuple[int, Any]:
+        """Create an InstanceType via the private API."""
+        payload = json.dumps(
+            {
+                "metadata": {"name": name},
+                "spec": {"cores": cores, "memory_gib": memory_gib},
+            }
+        ).encode()
+        return self._private_request("/api/private/v1/instance_types", admin_token, method="POST", data=payload)
+
+    def delete_instance_type(self, instance_type_id: str, admin_token: str) -> tuple[int, Any]:
+        """DELETE an InstanceType via the private API."""
+        encoded = urllib.parse.quote(instance_type_id, safe="")
+        return self._private_request(f"/api/private/v1/instance_types/{encoded}", admin_token, method="DELETE")
+
+    # --- ExternalIPPool (private admin API) ---
+
+    def _private_request(
+        self,
+        path: str,
+        admin_token: str,
+        *,
+        method: str = "GET",
+        data: bytes | None = None,
+    ) -> tuple[int, Any]:
+        """Issue a request to the private fulfillment API (admin-only)."""
+        hdrs = {
+            "Authorization": f"Bearer {admin_token}",
+            "Content-Type": "application/json",
+        }
+        return _request(
+            f"{self._config.fulfillment_private_url}{path}",
+            method=method,
+            data=data,
+            headers=hdrs,
+            verify_ssl=self._verify,
+        )
+
+    def create_external_ip_pool(
+        self, name: str, cidrs: list[str], admin_token: str, ip_family: str = "IP_FAMILY_IPV4"
+    ) -> tuple[int, Any]:
+        """Create an ExternalIPPool via the private API."""
+        payload = json.dumps(
+            {
+                "metadata": {"name": name},
+                "spec": {"cidrs": cidrs, "ip_family": ip_family},
+            }
+        ).encode()
+        return self._private_request("/api/private/v1/external_ip_pools", admin_token, method="POST", data=payload)
+
+    def get_external_ip_pool(self, pool_id: str, admin_token: str) -> tuple[int, Any]:
+        """GET an ExternalIPPool by ID via the private API."""
+        encoded = urllib.parse.quote(pool_id, safe="")
+        return self._private_request(f"/api/private/v1/external_ip_pools/{encoded}", admin_token)
+
+    def delete_external_ip_pool(self, pool_id: str, admin_token: str) -> tuple[int, Any]:
+        """DELETE an ExternalIPPool via the private API."""
+        encoded = urllib.parse.quote(pool_id, safe="")
+        return self._private_request(f"/api/private/v1/external_ip_pools/{encoded}", admin_token, method="DELETE")
+
+    def wait_external_ip_pool_ready(
+        self, pool_id: str, admin_token: str, timeout: int = 120, interval: int = 3
+    ) -> None:
+        """Poll until ExternalIPPool status.state == READY."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s, b = self.get_external_ip_pool(pool_id, admin_token)
+            if s == 200 and isinstance(b, dict):
+                state = b.get("status", {}).get("state", "")
+                if state == "EXTERNAL_IP_POOL_STATE_READY":
+                    return
+                if "FAILED" in state:
+                    msg = b.get("status", {}).get("message", "")
+                    raise RuntimeError(f"ExternalIPPool {pool_id} failed: {msg}")
+            time.sleep(interval)
+        raise RuntimeError(f"ExternalIPPool {pool_id} not READY within {timeout}s")
+
+    # --- ExternalIP (public API) ---
+
+    def create_external_ip(self, name: str, pool_id: str) -> tuple[int, Any]:
+        """Allocate an ExternalIP from a pool."""
+        payload = json.dumps(
+            {
+                "metadata": {"name": name},
+                "spec": {"pool": pool_id},
+            }
+        ).encode()
+        return self._api_request("/api/fulfillment/v1/external_ips", method="POST", data=payload)
+
+    def get_external_ip(self, eip_id: str) -> tuple[int, Any]:
+        """GET an ExternalIP by ID."""
+        encoded = urllib.parse.quote(eip_id, safe="")
+        return self._api_request(f"/api/fulfillment/v1/external_ips/{encoded}")
+
+    def delete_external_ip(self, eip_id: str) -> tuple[int, Any]:
+        """DELETE an ExternalIP."""
+        encoded = urllib.parse.quote(eip_id, safe="")
+        return self._api_request(f"/api/fulfillment/v1/external_ips/{encoded}", method="DELETE")
+
+    def wait_external_ip_allocated(self, eip_id: str, timeout: int = 120, interval: int = 3) -> str:
+        """Poll until ExternalIP is ALLOCATED. Returns the allocated address."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s, b = self.get_external_ip(eip_id)
+            if s == 200 and isinstance(b, dict):
+                state = b.get("status", {}).get("state", "")
+                if state == "EXTERNAL_IP_STATE_ALLOCATED":
+                    return b.get("status", {}).get("address", "")
+                if state == "EXTERNAL_IP_STATE_FAILED":
+                    raise RuntimeError(f"ExternalIP {eip_id} failed: {b.get('status', {}).get('message', '')}")
+            time.sleep(interval)
+        raise RuntimeError(f"ExternalIP {eip_id} not ALLOCATED within {timeout}s")
+
+    # --- ExternalIPAttachment (public API) ---
+
+    def create_external_ip_attachment(self, name: str, eip_id: str, compute_instance_id: str) -> tuple[int, Any]:
+        """Attach an ExternalIP to a ComputeInstance."""
+        payload = json.dumps(
+            {
+                "metadata": {"name": name},
+                "spec": {"external_ip": eip_id, "compute_instance": compute_instance_id},
+            }
+        ).encode()
+        return self._api_request("/api/fulfillment/v1/external_ip_attachments", method="POST", data=payload)
+
+    def get_external_ip_attachment(self, attach_id: str) -> tuple[int, Any]:
+        """GET an ExternalIPAttachment by ID."""
+        encoded = urllib.parse.quote(attach_id, safe="")
+        return self._api_request(f"/api/fulfillment/v1/external_ip_attachments/{encoded}")
+
+    def delete_external_ip_attachment(self, attach_id: str) -> tuple[int, Any]:
+        """DELETE an ExternalIPAttachment."""
+        encoded = urllib.parse.quote(attach_id, safe="")
+        return self._api_request(f"/api/fulfillment/v1/external_ip_attachments/{encoded}", method="DELETE")
+
+    def wait_external_ip_attachment_ready(self, attach_id: str, timeout: int = 300, interval: int = 3) -> None:
+        """Poll until ExternalIPAttachment status.state == READY."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s, b = self.get_external_ip_attachment(attach_id)
+            if s == 200 and isinstance(b, dict):
+                state = b.get("status", {}).get("state", "")
+                if state == "EXTERNAL_IP_ATTACHMENT_STATE_READY":
+                    return
+                if state == "EXTERNAL_IP_ATTACHMENT_STATE_FAILED":
+                    raise RuntimeError(
+                        f"ExternalIPAttachment {attach_id} failed: {b.get('status', {}).get('message', '')}"
+                    )
+            time.sleep(interval)
+        raise RuntimeError(f"ExternalIPAttachment {attach_id} not READY within {timeout}s")
+
+    # --- ComputeInstance CRUD ---
+
+    def create_compute_instance_from_template(
+        self,
+        name: str,
+        template_id: str,
+        subnet_id: str = "",
+        instance_type_name: str = "",
+        token: str | None = None,
+    ) -> tuple[int, Any]:
+        """Create a ComputeInstance from a template with optional network attachment and instance type."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        spec: dict[str, Any] = {"template": template_id}
+        if subnet_id:
+            spec["network_attachments"] = [{"subnet": subnet_id}]
+        if instance_type_name:
+            spec["instance_type"] = instance_type_name
+        payload = json.dumps({"metadata": {"name": name}, "spec": spec}).encode()
+        return self._api_request(
+            "/api/fulfillment/v1/compute_instances",
+            method="POST",
+            data=payload,
+            headers_override=hdrs,
+        )
+
+    def get_compute_instance(self, instance_id: str, token: str | None = None) -> tuple[int, Any]:
+        """GET a ComputeInstance by ID."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(instance_id, safe="")
+        return self._api_request(f"/api/fulfillment/v1/compute_instances/{encoded}", headers_override=hdrs)
+
+    def delete_compute_instance(self, instance_id: str, token: str | None = None) -> tuple[int, Any]:
+        """DELETE a ComputeInstance by ID."""
+        hdrs = dict(self._headers)
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        encoded = urllib.parse.quote(instance_id, safe="")
+        return self._api_request(
+            f"/api/fulfillment/v1/compute_instances/{encoded}",
+            method="DELETE",
+            headers_override=hdrs,
+        )
+
+    def wait_compute_instance_running(
+        self, instance_id: str, timeout: int = 600, interval: int = 10, token: str | None = None
+    ) -> None:
+        """Poll until ComputeInstance status.state == RUNNING."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s, b = self.get_compute_instance(instance_id, token=token)
+            if s == 200 and isinstance(b, dict):
+                state = b.get("status", {}).get("state", "")
+                if state == "COMPUTE_INSTANCE_STATE_RUNNING":
+                    return
+                if "FAILED" in state or "ERROR" in state:
+                    raise RuntimeError(f"ComputeInstance {instance_id} entered {state}")
+            time.sleep(interval)
+        raise RuntimeError(f"ComputeInstance {instance_id} not RUNNING within {timeout}s")
 
 
 # ---------------------------------------------------------------------------

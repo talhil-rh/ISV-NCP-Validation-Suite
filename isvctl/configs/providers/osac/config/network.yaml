@@ -96,7 +96,7 @@ commands:
         args:
           - "--region"
           - "{{region}}"
-        timeout: 60
+        timeout: 180
 
       # =======================================================================
       # SETUP: Create shared VNet + subnets
@@ -175,6 +175,19 @@ commands:
         timeout: 400
 
       # =======================================================================
+      # TEST: Floating IP (ExternalIP) switch between two instances (SDN05-01)
+      # =======================================================================
+      - name: floating_ip_test
+        phase: test
+        command: "python3 ../scripts/network/floating_ip_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 1200
+
+      # =======================================================================
       # TEARDOWN: Cleanup ephemeral tenant and network resources
       # =======================================================================
       - name: teardown
@@ -196,6 +209,12 @@ tests:
 
   settings:
     region: "osac-default"
+
+  validations:
+    sdn:
+      checks:
+        FloatingIpCheck:
+          max_switch_seconds: 120
 
   exclude:
     labels: ["ssh"]

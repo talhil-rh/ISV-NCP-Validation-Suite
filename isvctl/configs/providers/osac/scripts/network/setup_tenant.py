@@ -40,6 +40,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -119,6 +121,50 @@ def main() -> int:
             return 1
 
         result["tenant_namespace"] = namespace
+
+        # WORKAROUND: Create the storage-config secret that the storage operator
+        # checks for when provisioning compute instance volumes per tenant. Remove
+        # this once the osac-operator auto-provisions tenant storage classes.
+        secret_manifest = (
+            f"apiVersion: v1\nkind: Secret\n"
+            f"metadata:\n  name: vast-tenant-config-{tenant_name}\n"
+            f"  namespace: {config.tenant_namespace}\n"
+            f"  labels:\n    osac.openshift.io/tenant: {tenant_name}\n"
+            f"stringData:\n  placeholder: 'true'\n"
+        )
+        kubectl = shutil.which("kubectl") or shutil.which("oc") or "kubectl"
+        subprocess.run(
+            [kubectl, "apply", "-f", "-"],
+            input=secret_manifest,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+
+        # Wait for the storage controller to detect the secret and populate
+        # tenant.status.storageClasses — needed before compute instances can be provisioned.
+        storage_deadline = time.time() + 60
+        while time.time() < storage_deadline:
+            probe = subprocess.run(
+                [
+                    kubectl,
+                    "get",
+                    "tenant",
+                    tenant_name,
+                    "-n",
+                    config.tenant_namespace,
+                    "-o",
+                    "jsonpath={.status.storageClasses}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            sc = probe.stdout.strip()
+            if sc and sc not in ("null", "[]", ""):
+                break
+            time.sleep(3)
+
         result["success"] = True
 
     except Exception as exc:

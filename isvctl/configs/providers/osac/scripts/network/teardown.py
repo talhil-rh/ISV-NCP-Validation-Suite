@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -133,6 +135,26 @@ def main() -> int:
                 TenantClient(config).delete(args.tenant_name)
             except Exception as e:
                 cleanup_errors.append(f"delete tenant: {e}")
+
+        # WORKAROUND: delete the storage-config secret created by setup_tenant.py.
+        if args.tenant_name:
+            try:
+                kubectl = shutil.which("kubectl") or shutil.which("oc") or "kubectl"
+                subprocess.run(
+                    [
+                        kubectl,
+                        "delete",
+                        "secret",
+                        f"vast-tenant-config-{args.tenant_name}",
+                        "-n",
+                        config.tenant_namespace,
+                        "--ignore-not-found",
+                    ],
+                    capture_output=True,
+                    timeout=15,
+                )
+            except Exception as e:
+                cleanup_errors.append(f"delete storage secret: {e}")
 
         result["success"] = True
 
