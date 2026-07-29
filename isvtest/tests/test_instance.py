@@ -24,9 +24,16 @@ import pytest
 from isvtest.validations.instance import (
     SERIAL_CONSOLE_RETENTION_DAYS_REQUIRED,
     ComponentKeyAccessCheck,
+    InstanceListCheck,
+    InstancePowerCycleCheck,
     InstanceRebootCheck,
     InstanceSpecifiedKeyCheck,
+    InstanceStartCheck,
+    InstanceStateCheck,
+    InstanceStopCheck,
+    InstanceTagCheck,
     SerialConsoleRetentionCheck,
+    StableIdentifierCheck,
 )
 
 
@@ -363,3 +370,383 @@ class TestSerialConsoleRetentionCheck:
         result = v.execute()
         assert result["passed"] is False
         assert "No 'retention_evidence'" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# OSAC bare metal lifecycle tests
+# ---------------------------------------------------------------------------
+
+
+class TestInstanceStateCheck:
+    """Tests for InstanceStateCheck (launch and describe state)."""
+
+    def test_passes_when_state_matches_expected(self) -> None:
+        """Instance in expected state passes."""
+        v = InstanceStateCheck(
+            config={
+                "step_output": {"instance_id": "bmi-abc", "state": "running"},
+                "expected_state": "running",
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is True
+        assert "running" in result["output"]
+
+    def test_fails_when_instance_id_missing(self) -> None:
+        """No instance_id in output fails immediately."""
+        v = InstanceStateCheck(config={"step_output": {"state": "running"}})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "instance_id" in result["error"]
+
+    def test_fails_when_state_missing(self) -> None:
+        """No state field in output fails."""
+        v = InstanceStateCheck(config={"step_output": {"instance_id": "bmi-abc"}})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "state" in result["error"].lower()
+
+    def test_fails_when_state_wrong(self) -> None:
+        """Wrong state fails with descriptive message."""
+        v = InstanceStateCheck(
+            config={
+                "step_output": {"instance_id": "bmi-abc", "state": "stopped"},
+                "expected_state": "running",
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "stopped" in result["error"]
+        assert "running" in result["error"]
+
+    def test_custom_expected_state(self) -> None:
+        """Non-default expected_state=stopped passes when instance is stopped."""
+        v = InstanceStateCheck(
+            config={
+                "step_output": {"instance_id": "bmi-abc", "state": "stopped"},
+                "expected_state": "stopped",
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is True
+
+
+class TestInstanceListCheck:
+    """Tests for InstanceListCheck (list_instances step)."""
+
+    def _passing_output(self, target: str = "bmi-001") -> dict[str, Any]:
+        return {
+            "instances": [
+                {"instance_id": target, "state": "running", "vpc_id": "sub-abc"},
+            ],
+            "count": 1,
+            "found_target": True,
+            "target_instance": target,
+        }
+
+    def test_passes_with_valid_list_and_target_found(self) -> None:
+        v = InstanceListCheck(config={"step_output": self._passing_output()})
+        result = v.execute()
+        assert result["passed"] is True
+        assert "bmi-001" in result["output"]
+
+    def test_fails_when_instances_key_missing(self) -> None:
+        v = InstanceListCheck(config={"step_output": {}})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "instances" in result["error"]
+
+    def test_fails_when_list_is_empty(self) -> None:
+        v = InstanceListCheck(
+            config={
+                "step_output": {
+                    "instances": [],
+                    "count": 0,
+                    "found_target": False,
+                    "target_instance": "bmi-001",
+                }
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "1 instance" in result["error"]
+
+    def test_fails_when_target_not_found(self) -> None:
+        out = self._passing_output()
+        out["found_target"] = False
+        v = InstanceListCheck(config={"step_output": out})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "bmi-001" in result["error"]
+
+    def test_fails_when_instance_missing_required_field(self) -> None:
+        """An instance entry without vpc_id fails the field check."""
+        v = InstanceListCheck(
+            config={
+                "step_output": {
+                    "instances": [{"instance_id": "bmi-001", "state": "running"}],
+                    "count": 1,
+                    "found_target": True,
+                    "target_instance": "bmi-001",
+                }
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "vpc_id" in result["error"]
+
+
+class TestInstanceTagCheck:
+    """Tests for InstanceTagCheck (verify_tags step)."""
+
+    def test_passes_with_required_tags_present(self) -> None:
+        v = InstanceTagCheck(
+            config={
+                "step_output": {
+                    "instance_id": "bmi-001",
+                    "tags": {"Name": "osac-bm-validation", "CreatedBy": "isv-validation"},
+                    "tag_count": 2,
+                },
+                "required_keys": ["Name", "CreatedBy"],
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is True
+        assert "2 tag" in result["output"]
+
+    def test_fails_when_tags_key_missing(self) -> None:
+        v = InstanceTagCheck(config={"step_output": {"instance_id": "bmi-001"}, "required_keys": []})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "tags" in result["error"].lower()
+
+    def test_fails_when_tags_empty(self) -> None:
+        v = InstanceTagCheck(
+            config={
+                "step_output": {"instance_id": "bmi-001", "tags": {}, "tag_count": 0},
+                "required_keys": [],
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "no tags" in result["error"].lower()
+
+    def test_fails_when_required_key_missing(self) -> None:
+        v = InstanceTagCheck(
+            config={
+                "step_output": {
+                    "instance_id": "bmi-001",
+                    "tags": {"Name": "test"},
+                    "tag_count": 1,
+                },
+                "required_keys": ["Name", "CreatedBy"],
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "CreatedBy" in result["error"]
+
+    def test_fails_when_instance_id_missing(self) -> None:
+        v = InstanceTagCheck(config={"step_output": {}})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "instance_id" in result["error"]
+
+
+class TestInstanceStopCheck:
+    """Tests for InstanceStopCheck (stop_instance step)."""
+
+    def test_passes_when_stopped(self) -> None:
+        v = InstanceStopCheck(
+            config={
+                "step_output": {
+                    "instance_id": "bmi-001",
+                    "stop_initiated": True,
+                    "state": "stopped",
+                }
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is True
+        assert "stopped" in result["output"]
+
+    def test_fails_when_instance_id_missing(self) -> None:
+        v = InstanceStopCheck(config={"step_output": {"stop_initiated": True, "state": "stopped"}})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "instance_id" in result["error"]
+
+    def test_fails_when_stop_not_initiated(self) -> None:
+        v = InstanceStopCheck(
+            config={
+                "step_output": {
+                    "instance_id": "bmi-001",
+                    "stop_initiated": False,
+                    "state": "stopped",
+                }
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "not initiated" in result["error"].lower()
+
+    def test_fails_when_state_not_stopped(self) -> None:
+        v = InstanceStopCheck(
+            config={
+                "step_output": {
+                    "instance_id": "bmi-001",
+                    "stop_initiated": True,
+                    "state": "running",
+                }
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "running" in result["error"]
+
+
+class TestInstanceStartCheck:
+    """Tests for InstanceStartCheck (start_instance step)."""
+
+    def _passing_output(self, **overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "instance_id": "bmi-001",
+            "start_initiated": True,
+            "state": "running",
+            "ssh_ready": True,
+        }
+        base.update(overrides)
+        return base
+
+    def test_passes_when_running_and_ssh_ready(self) -> None:
+        v = InstanceStartCheck(config={"step_output": self._passing_output()})
+        result = v.execute()
+        assert result["passed"] is True
+
+    def test_fails_when_instance_id_missing(self) -> None:
+        v = InstanceStartCheck(config={"step_output": {"start_initiated": True, "state": "running", "ssh_ready": True}})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "instance_id" in result["error"]
+
+    def test_fails_when_start_not_initiated(self) -> None:
+        v = InstanceStartCheck(config={"step_output": self._passing_output(start_initiated=False)})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "not initiated" in result["error"].lower()
+
+    def test_fails_when_state_not_running(self) -> None:
+        v = InstanceStartCheck(config={"step_output": self._passing_output(state="stopped")})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "stopped" in result["error"]
+
+    def test_fails_when_ssh_not_ready(self) -> None:
+        v = InstanceStartCheck(config={"step_output": self._passing_output(ssh_ready=False)})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "SSH not ready" in result["error"]
+
+
+class TestInstancePowerCycleCheck:
+    """Tests for InstancePowerCycleCheck (power_cycle_instance step)."""
+
+    def _passing_output(self, **overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "instance_id": "bmi-001",
+            "power_cycle_initiated": True,
+            "power_was_off": True,
+            "state": "running",
+            "ssh_ready": True,
+            "recovery_seconds": 180,
+        }
+        base.update(overrides)
+        return base
+
+    def test_passes_with_all_fields(self) -> None:
+        v = InstancePowerCycleCheck(config={"step_output": self._passing_output()})
+        result = v.execute()
+        assert result["passed"] is True
+        assert "power-cycle" in result["output"]
+
+    def test_fails_when_instance_id_missing(self) -> None:
+        out = self._passing_output()
+        del out["instance_id"]
+        v = InstancePowerCycleCheck(config={"step_output": out})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "instance_id" in result["error"]
+
+    def test_fails_when_power_cycle_not_initiated(self) -> None:
+        v = InstancePowerCycleCheck(config={"step_output": self._passing_output(power_cycle_initiated=False)})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "not initiated" in result["error"].lower()
+
+    def test_fails_when_power_was_not_off(self) -> None:
+        v = InstancePowerCycleCheck(config={"step_output": self._passing_output(power_was_off=False)})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "powered-off" in result["error"]
+
+    def test_fails_when_state_not_running(self) -> None:
+        v = InstancePowerCycleCheck(config={"step_output": self._passing_output(state="stopped")})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "stopped" in result["error"]
+
+    def test_fails_when_ssh_not_ready(self) -> None:
+        v = InstancePowerCycleCheck(config={"step_output": self._passing_output(ssh_ready=False)})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "SSH not ready" in result["error"]
+
+    def test_fails_when_recovery_too_long(self) -> None:
+        v = InstancePowerCycleCheck(
+            config={
+                "step_output": self._passing_output(recovery_seconds=1000),
+                "max_recovery_time": 900,
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "1000" in result["error"]
+
+
+class TestStableIdentifierCheck:
+    """Tests for StableIdentifierCheck (start_checks / reboot_checks)."""
+
+    def test_passes_when_ids_match(self) -> None:
+        v = StableIdentifierCheck(
+            config={
+                "step_output": {"instance_id": "bmi-001"},
+                "reference_id": "bmi-001",
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is True
+        assert "stable" in result["output"].lower()
+
+    def test_fails_when_instance_id_missing(self) -> None:
+        v = StableIdentifierCheck(config={"step_output": {}, "reference_id": "bmi-001"})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "instance_id" in result["error"]
+
+    def test_fails_when_no_reference_id(self) -> None:
+        v = StableIdentifierCheck(config={"step_output": {"instance_id": "bmi-001"}, "reference_id": ""})
+        result = v.execute()
+        assert result["passed"] is False
+        assert "reference_id" in result["error"]
+
+    def test_fails_when_ids_differ(self) -> None:
+        v = StableIdentifierCheck(
+            config={
+                "step_output": {"instance_id": "bmi-999"},
+                "reference_id": "bmi-001",
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "bmi-999" in result["error"]
+        assert "bmi-001" in result["error"]

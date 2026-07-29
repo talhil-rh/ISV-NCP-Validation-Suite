@@ -973,6 +973,61 @@ class FulfillmentClient:
             time.sleep(interval)
         raise RuntimeError(f"ComputeInstance {instance_id} not RUNNING within {timeout}s")
 
+    # --- BareMetalInstance CRUD (public tenant API) ---
+
+    def create_bare_metal_instance(self, body: dict[str, Any]) -> tuple[int, Any]:
+        """POST /api/fulfillment/v1/baremetal_instances."""
+        payload = json.dumps(body).encode()
+        return self._api_request("/api/fulfillment/v1/baremetal_instances", method="POST", data=payload)
+
+    def get_bare_metal_instance(self, bmi_id: str) -> tuple[int, Any]:
+        """GET /api/fulfillment/v1/baremetal_instances/{id}."""
+        encoded = urllib.parse.quote(bmi_id, safe="")
+        return self._api_request(f"/api/fulfillment/v1/baremetal_instances/{encoded}")
+
+    def list_bare_metal_instances(self, filter_expr: str | None = None) -> tuple[int, Any]:
+        """GET /api/fulfillment/v1/baremetal_instances."""
+        path = "/api/fulfillment/v1/baremetal_instances"
+        if filter_expr:
+            path += f"?filter={urllib.parse.quote(filter_expr, safe='')}"
+        return self._api_request(path)
+
+    def update_bare_metal_instance(
+        self, bmi_id: str, patch: dict[str, Any], update_mask: list[str]
+    ) -> tuple[int, Any]:
+        """PATCH /api/fulfillment/v1/baremetal_instances/{id}."""
+        encoded = urllib.parse.quote(bmi_id, safe="")
+        mask = urllib.parse.quote(",".join(update_mask), safe="")
+        payload = json.dumps(patch).encode()
+        return self._api_request(
+            f"/api/fulfillment/v1/baremetal_instances/{encoded}?update_mask={mask}",
+            method="PATCH",
+            data=payload,
+        )
+
+    def delete_bare_metal_instance(self, bmi_id: str) -> tuple[int, Any]:
+        """DELETE /api/fulfillment/v1/baremetal_instances/{id}."""
+        encoded = urllib.parse.quote(bmi_id, safe="")
+        return self._api_request(f"/api/fulfillment/v1/baremetal_instances/{encoded}", method="DELETE")
+
+    def wait_bare_metal_instance_state(
+        self, bmi_id: str, target_state: str, timeout: int = 900, interval: int = 10
+    ) -> dict[str, Any]:
+        """Poll GET until status.state matches target_state (case-insensitive)."""
+        deadline = time.time() + timeout
+        target_lower = target_state.lower()
+        while time.time() < deadline:
+            s, b = self.get_bare_metal_instance(bmi_id)
+            if s == 200 and isinstance(b, dict):
+                raw_state = b.get("status", {}).get("state", "")
+                state_lower = raw_state.lower()
+                if state_lower == target_lower:
+                    return b
+                if "failed" in state_lower and target_lower != "failed":
+                    raise RuntimeError(f"BareMetalInstance {bmi_id} entered {raw_state}")
+            time.sleep(interval)
+        raise RuntimeError(f"BareMetalInstance {bmi_id} did not reach '{target_state}' within {timeout}s")
+
 
 # ---------------------------------------------------------------------------
 # Tenant CRD (kubectl)
@@ -1391,7 +1446,6 @@ def create_sa_token(namespace: str, sa_name: str, duration: str = "3600s") -> tu
     iat = payload.get("iat", 0)
     ttl = exp - iat if exp and iat else int(duration.rstrip("s"))
     return token_str, ttl
-
 
 def get_cert_manager_certificates() -> list[dict[str, Any]]:
     """List cert-manager Certificate resources across all namespaces."""
