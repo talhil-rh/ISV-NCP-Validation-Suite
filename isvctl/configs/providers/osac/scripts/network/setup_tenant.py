@@ -58,7 +58,7 @@ from common.osac_client import (
 
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 POLL_INTERVAL = 2
-POLL_TIMEOUT = 60
+POLL_TIMEOUT = 180
 
 
 def main() -> int:

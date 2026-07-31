@@ -31,7 +31,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.osac_client import FulfillmentClient, create_sa_token, get_env_config
+from common.osac_client import FulfillmentClient, create_sa_token, get_admin_token, get_env_config
 
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 
@@ -61,8 +61,11 @@ def main() -> int:
         return 0
 
     try:
-        config = get_env_config(require_admin=False)
-        token, _ttl = create_sa_token(args.tenant_namespace, "default")
+        # Use admin Keycloak credentials — the ephemeral tenant namespace is
+        # already deleted by teardown, and the admin token has cross-tenant
+        # visibility so it correctly returns 404 once the BMI is gone.
+        config = get_env_config(require_admin=True)
+        token = get_admin_token(config)
         client = FulfillmentClient(config, token)
 
         status, _ = client.get_bare_metal_instance(args.instance_id)

@@ -69,13 +69,51 @@ def extract_external_ip(body: dict[str, Any]) -> str | None:
         ip = status.get(field)
         if ip:
             return str(ip)
-    # Some implementations embed the IP per-network-attachment
     for attachment in status.get("network_attachments", []):
         for field in ("external_ip", "public_ip"):
             ip = attachment.get(field)
             if ip:
                 return str(ip)
     return None
+
+
+def get_bmh_ip(bmi_id: str, operator_namespace: str = "osac-e2e-ci") -> str | None:
+    """Look up the NIC IP from the BareMetalHost assigned to this BareMetalInstance.
+
+    The BMF operator creates a BareMetalInstance CRD named ``bmi-<fulfillment-id>``
+    whose ``spec.externalHostID`` is ``<namespace>/<bmh-name>``.  The BMH's
+    ``status.hardware.nics`` list contains the discovered IP addresses.
+    """
+    try:
+        import shutil
+        kubectl = shutil.which("kubectl") or shutil.which("oc")
+        if not kubectl:
+            return None
+
+        crd_name = f"bmi-{bmi_id}"
+        r = subprocess.run(
+            [kubectl, "get", "baremetalinstance", crd_name, "-n", operator_namespace,
+             "-o", "jsonpath={.spec.externalHostID}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+
+        external_host_id = r.stdout.strip()  # e.g. "host-inventory/virtual-bmh-caas-2"
+        parts = external_host_id.split("/", 1)
+        if len(parts) != 2:
+            return None
+        bmh_namespace, bmh_name = parts
+
+        r2 = subprocess.run(
+            [kubectl, "get", "baremetalhost", bmh_name, "-n", bmh_namespace,
+             "-o", "jsonpath={.status.hardware.nics[0].ip}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        ip = r2.stdout.strip()
+        return ip if ip else None
+    except Exception:
+        return None
 
 
 def main() -> int:
@@ -142,7 +180,7 @@ def main() -> int:
         body: dict[str, Any] = {
             "metadata": {
                 "name": bmi_name,
-                "labels": {"Name": "osac-bm-validation", "CreatedBy": "isv-validation"},
+                "labels": {"name": "osac-bm-validation", "created-by": "isv-validation"},
             },
             "spec": {
                 "catalog_item": args.catalog_item,
@@ -166,9 +204,10 @@ def main() -> int:
         # Poll until the instance is running
         final_body = client.wait_bare_metal_instance_state(bmi_id, "running", timeout=POLL_TIMEOUT)
         raw_state = final_body.get("status", {}).get("state", "")
-        result["state"] = raw_state.lower()
+        result["state"] = raw_state.lower().removeprefix("bare_metal_instance_state_")
 
-        external_ip = extract_external_ip(final_body) or ""
+        # Try fulfillment API status first, fall back to BMH NIC IP from K8s
+        external_ip = extract_external_ip(final_body) or get_bmh_ip(bmi_id) or ""
         result["external_ip"] = external_ip
         result["public_ip"] = external_ip
         result["success"] = True

@@ -75,7 +75,7 @@ def ssh_probe(key_file: str, external_ip: str) -> tuple[bool, str]:
                     "ConnectTimeout=10",
                     "-o",
                     "BatchMode=yes",
-                    f"root@{external_ip}",
+                    f"fedora@{external_ip}",
                     "echo ok",
                 ],
                 capture_output=True,
@@ -107,7 +107,7 @@ def get_uptime_seconds(key_file: str, external_ip: str) -> float | None:
                 "ConnectTimeout=10",
                 "-o",
                 "BatchMode=yes",
-                f"root@{external_ip}",
+                f"fedora@{external_ip}",
                 "cat /proc/uptime",
             ],
             capture_output=True,
@@ -192,7 +192,7 @@ def main() -> int:
         # Step 4: poll until running
         final_body = client.wait_bare_metal_instance_state(args.instance_id, "running", timeout=REBOOT_TIMEOUT)
         raw_state = final_body.get("status", {}).get("state", "")
-        result["state"] = raw_state.lower()
+        result["state"] = raw_state.lower().removeprefix("bare_metal_instance_state_")
 
         # Step 5: SSH probe + uptime check
         ssh_ready, _ = ssh_probe(args.key_file, args.external_ip)

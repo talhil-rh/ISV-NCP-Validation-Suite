@@ -255,3 +255,9 @@ tests:
       - "iam"
       - "vm"
       - "network"
+
+  validations:
+    tag_checks:
+      checks:
+        InstanceTagCheck:
+          required_keys: ["name", "created-by"]

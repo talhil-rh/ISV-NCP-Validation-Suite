@@ -94,7 +94,7 @@ def main() -> int:
             instances.append(
                 {
                     "instance_id": bmi_id,
-                    "state": raw_state.lower(),
+                    "state": raw_state.lower().removeprefix("bare_metal_instance_state_"),
                     "vpc_id": vpc_id,
                 }
             )

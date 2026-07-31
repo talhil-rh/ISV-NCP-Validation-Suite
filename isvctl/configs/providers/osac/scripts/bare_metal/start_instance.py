@@ -61,7 +61,7 @@ def ssh_probe(key_file: str, external_ip: str) -> tuple[bool, str]:
                     "ConnectTimeout=10",
                     "-o",
                     "BatchMode=yes",
-                    f"root@{external_ip}",
+                    f"fedora@{external_ip}",
                     "echo ok",
                 ],
                 capture_output=True,
@@ -119,7 +119,7 @@ def main() -> int:
 
         final_body = client.wait_bare_metal_instance_state(args.instance_id, "running", timeout=START_TIMEOUT)
         raw_state = final_body.get("status", {}).get("state", "")
-        result["state"] = raw_state.lower()
+        result["state"] = raw_state.lower().removeprefix("bare_metal_instance_state_")
 
         ssh_ready, ssh_msg = ssh_probe(args.key_file, args.external_ip)
         result["ssh_ready"] = ssh_ready

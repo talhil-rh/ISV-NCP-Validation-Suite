@@ -136,15 +136,20 @@ def main() -> int:
         sub = resp.get("sub") or "<unknown>"
         result["tests"]["identity"] = {"passed": True, "message": f"authenticated as {sub}"}
 
-        # ── Access probe ──────────────────────────────────────────────────────
-        status, resp = _get_bearer(f"{base}/userinfo", access_token, verify)
-
-        if status == 200 and isinstance(resp, dict):
-            userinfo_sub = resp.get("sub", sub)
-            result["tests"]["access"] = {"passed": True, "message": f"userinfo returned sub={userinfo_sub}"}
-            result["success"] = True
+        # ── Access probe — fulfillment REST API ───────────────────────────────
+        # Call the fulfillment service with the minted token to prove the
+        # credential has authorized API access beyond Keycloak itself.
+        fulfillment_url = os.environ.get("OSAC_FULFILLMENT_URL", "").rstrip("/")
+        if not fulfillment_url:
+            result["tests"]["access"] = {"passed": False, "message": "OSAC_FULFILLMENT_URL not set"}
         else:
-            result["tests"]["access"]["message"] = f"userinfo endpoint returned HTTP {status}: {resp}"
+            status, resp = _get_bearer(f"{fulfillment_url}/api/fulfillment/v1/virtual_networks", access_token, verify)
+            if status == 200:
+                count = len(resp.get("virtual_networks", [])) if isinstance(resp, dict) else 0
+                result["tests"]["access"] = {"passed": True, "message": f"fulfillment API accessible ({count} vnets)"}
+                result["success"] = True
+            else:
+                result["tests"]["access"]["message"] = f"fulfillment API returned HTTP {status}: {resp}"
 
     except Exception as exc:
         result["error"] = str(exc)

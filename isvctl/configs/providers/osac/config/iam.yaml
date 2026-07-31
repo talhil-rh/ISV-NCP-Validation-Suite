@@ -32,6 +32,10 @@
 #   OSAC_KEYCLOAK_URL, OSAC_KEYCLOAK_REALM,
 #   OSAC_ADMIN_CLIENT_ID, OSAC_ADMIN_CLIENT_SECRET,
 #   Optional: OSAC_VERIFY_SSL (default "true"), ISVCTL_DEMO_MODE
+#
+# Note: OSAC does not expose client-creation rights to test service accounts,
+# so this provider surfaces the pre-existing osac-admin service account as the
+# IAM credential under test rather than creating an ephemeral one.
 
 import:
   - ../../../suites/iam.yaml
@@ -70,9 +74,6 @@ commands:
       - name: teardown
         phase: teardown
         command: "python3 ../scripts/iam/teardown.py"
-        args:
-          - "--client-uuid"
-          - "{{steps.create_user.client_uuid}}"
         timeout: 30
         output_schema: teardown
 

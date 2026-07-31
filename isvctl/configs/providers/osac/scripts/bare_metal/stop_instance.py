@@ -76,7 +76,7 @@ def main() -> int:
 
         final_body = client.wait_bare_metal_instance_state(args.instance_id, "stopped", timeout=STOP_TIMEOUT)
         raw_state = final_body.get("status", {}).get("state", "")
-        result["state"] = raw_state.lower()
+        result["state"] = raw_state.lower().removeprefix("bare_metal_instance_state_")
         result["success"] = True
 
     except Exception as exc:

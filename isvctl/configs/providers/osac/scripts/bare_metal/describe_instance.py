@@ -95,7 +95,7 @@ def main() -> int:
             return 1
 
         raw_state = body.get("status", {}).get("state", "")
-        result["state"] = raw_state.lower()
+        result["state"] = raw_state.lower().removeprefix("bare_metal_instance_state_")
 
         # Try to read the external IP from the API response; fall back to
         # what was passed in via --external-ip (set during launch).

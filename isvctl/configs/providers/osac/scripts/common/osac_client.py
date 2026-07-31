@@ -1016,11 +1016,14 @@ class FulfillmentClient:
         """Poll GET until status.state matches target_state (case-insensitive)."""
         deadline = time.time() + timeout
         target_lower = target_state.lower()
+        # API returns full enum names like BARE_METAL_INSTANCE_STATE_RUNNING;
+        # strip the prefix so "running", "stopped", "failed" comparisons work.
+        _prefix = "bare_metal_instance_state_"
         while time.time() < deadline:
             s, b = self.get_bare_metal_instance(bmi_id)
             if s == 200 and isinstance(b, dict):
                 raw_state = b.get("status", {}).get("state", "")
-                state_lower = raw_state.lower()
+                state_lower = raw_state.lower().removeprefix(_prefix)
                 if state_lower == target_lower:
                     return b
                 if "failed" in state_lower and target_lower != "failed":
