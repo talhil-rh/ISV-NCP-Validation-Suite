@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from isvtest.core.resolution import (
+    DECLARABLE_CAPABILITIES,
     ErrorReason,
     ResolvedEntry,
     SkipReason,
@@ -37,19 +38,24 @@ from isvtest.core.resolution import (
     ValidationEntry,
     get_entry_phase,
     parse_validations,
+    requirements_satisfied,
     resolve_class_key,
     resolve_entries,
 )
 from isvtest.main import run_validations_via_pytest
 from isvtest.release_manifest import INCLUDE_UNRELEASED_ENV, load_released_test_filter
 
-from isvctl.config.schema import RunConfig
+from isvctl.config.schema import RunConfig, StepConfig
 from isvctl.orchestrator.commands import CommandExecutor
 from isvctl.orchestrator.context import Context
 from isvctl.orchestrator.step_executor import StepExecutor, StepResults
 from isvctl.redaction import redact_dict, redact_junit_xml_tree
 
 logger = logging.getLogger(__name__)
+
+# Platform label for a run whose config declares no commands, when the requirement
+# context names no execution environment either ("core" is a context, not a platform).
+VALIDATIONS_ONLY_PLATFORM = "validations"
 
 
 class Phase(StrEnum):
@@ -334,6 +340,34 @@ def _apply_step_validation_gates(steps: list[Any], released_tests: set[str] | No
     return gated_steps
 
 
+def _apply_capability_step_gates(
+    steps: list[Any],
+    validation_entries: list[ValidationEntry],
+    capability: str | None,
+) -> list[Any]:
+    """Skip a step when its explicit or validation-derived requirements do not match."""
+    if capability is None:
+        return steps
+    gated_steps: list[Any] = []
+    for step in steps:
+        explicit_requires = getattr(step, "requires", [])
+        if explicit_requires and not requirements_satisfied(explicit_requires, capability):
+            logger.info(
+                "Skipping step '%s' because it requires capability: %s",
+                step.name,
+                ", ".join(explicit_requires),
+            )
+            gated_steps.append(step.model_copy(update={"skip": True}))
+            continue
+        bound_entries = [entry for entry in validation_entries if entry.step == step.name]
+        if bound_entries and all(not requirements_satisfied(entry.requires, capability) for entry in bound_entries):
+            logger.info("Skipping step '%s' because all bound validations are capability-filtered", step.name)
+            gated_steps.append(step.model_copy(update={"skip": True}))
+        else:
+            gated_steps.append(step)
+    return gated_steps
+
+
 class Orchestrator:
     """Orchestrates the full test lifecycle using step-based execution.
 
@@ -361,8 +395,11 @@ class Orchestrator:
         self._results: list[PhaseResult] = []
         self._extra_pytest_args: list[str] | None = None
         self._include_labels: list[str] = []
+        self._exclude_labels: list[str] = []
+        self._capability: str | None = None
         self._verbose: bool = False
         self._junitxml: str | None = None
+        self._skipped_steps: set[str] = set()
 
     def run(
         self,
@@ -370,6 +407,8 @@ class Orchestrator:
         teardown_on_failure: bool = True,
         extra_pytest_args: list[str] | None = None,
         include_labels: list[str] | None = None,
+        exclude_labels: list[str] | None = None,
+        capability: str | None = None,
         verbose: bool = False,
         junitxml: str | None = None,
     ) -> OrchestratorResult:
@@ -383,6 +422,8 @@ class Orchestrator:
                 - `-m kubernetes`: Run only validations whose labels include "kubernetes"
                   (labels are mirrored as pytest marks)
             include_labels: Labels that selected validations must all contain.
+            exclude_labels: Labels that selected validations must not contain.
+            capability: Single capability context used to filter validation requirements.
             verbose: Enable verbose output for validations
             junitxml: Path to write JUnit XML report for validations
 
@@ -395,6 +436,8 @@ class Orchestrator:
         self._results = []
         self._extra_pytest_args = extra_pytest_args
         self._include_labels = include_labels or []
+        self._exclude_labels = exclude_labels or []
+        self._capability = capability
         self._verbose = verbose
         self._junitxml = junitxml
 
@@ -438,40 +481,67 @@ class Orchestrator:
         """
         logger.info(f"Running in steps mode for platform: {platform}")
 
-        config_phases = self.config.get_phases(platform)
-        if self.config.commands[platform].skip:
-            skipped_phases = _requested_config_phases(config_phases, requested_phases)
-            return OrchestratorResult(
-                success=True,
-                phases=[
-                    PhaseResult(
-                        phase=_phase_enum_for_name(phase_name),
-                        success=True,
-                        message=f"SKIPPED: platform '{platform}' is skipped by configuration",
-                    )
-                    for phase_name in skipped_phases
-                ],
-                inventory={},
-            )
+        if not self.config.commands:
+            # No lifecycle to drive: the run asserts against the current system.
+            # Every question below is about the commands mapping, so all of them
+            # are answered at once here rather than guarded one at a time.
+            logger.info("No commands configured; running validations only against the current system")
+            config_phases = [Phase.TEST.value]
+            steps: list[StepConfig] = []
+        else:
+            config_phases = self.config.get_phases(platform)
+            if self.config.commands[platform].skip:
+                skipped_phases = _requested_config_phases(config_phases, requested_phases)
+                return OrchestratorResult(
+                    success=True,
+                    phases=[
+                        PhaseResult(
+                            phase=_phase_enum_for_name(phase_name),
+                            success=True,
+                            message=f"SKIPPED: platform '{platform}' is skipped by configuration",
+                        )
+                        for phase_name in skipped_phases
+                    ],
+                    inventory={},
+                )
 
-        steps = self.config.get_steps(platform)
-        if not steps:
-            return OrchestratorResult(
-                success=False,
-                phases=[
-                    PhaseResult(
-                        phase=Phase.SETUP,
-                        success=False,
-                        message=f"No steps defined for platform: {platform}",
-                    )
-                ],
-            )
+            steps = self.config.get_steps(platform)
+            if not steps:
+                return OrchestratorResult(
+                    success=False,
+                    phases=[
+                        PhaseResult(
+                            phase=Phase.SETUP,
+                            success=False,
+                            message=f"No steps defined for platform: {platform}",
+                        )
+                    ],
+                )
 
         released_tests = load_released_test_filter()
         if released_tests is None:
             logger.info(f"Including unreleased validations because {INCLUDE_UNRELEASED_ENV} is enabled")
 
         steps = _apply_step_validation_gates(steps, released_tests)
+        all_validations = {}
+        if self.config.tests and self.config.tests.validations:
+            all_validations = self.config.tests.validations
+        validation_entries = parse_validations(all_validations)
+        # A run with no commands has only its validations to offer, so wiring none
+        # asserts nothing. Reporting that as a pass would make a miswired -f look
+        # like a green run; a lifecycle run still has its steps to answer for.
+        if not self.config.commands and not validation_entries:
+            return OrchestratorResult(
+                success=False,
+                phases=[
+                    PhaseResult(
+                        phase=Phase.TEST,
+                        success=False,
+                        message="No validations configured: a run without commands would assert nothing",
+                    )
+                ],
+            )
+        steps = _apply_capability_step_gates(steps, validation_entries, self._capability)
 
         logger.info(f"Configured phases: {config_phases}")
 
@@ -496,17 +566,15 @@ class Orchestrator:
 
         # Register step phases upfront so validation phase inference works
         # even before a step has executed. Skipped steps are excluded so
-        # their validations are also skipped automatically.
+        # their validations are also skipped automatically, and recorded so the
+        # skip reads as "switched off here" rather than "no such step".
+        self._skipped_steps = {step.name for step in steps if step.skip}
         for step in steps:
             if step.skip:
                 continue
             step_phase = (step.phase or "setup").lower()
             self.context.set_step_phase(step.name, step_phase)
 
-        all_validations = {}
-        if self.config.tests and self.config.tests.validations:
-            all_validations = self.config.tests.validations
-        validation_entries = parse_validations(all_validations)
         resolved_validations_by_index: dict[int, ResolvedEntry] = {}
 
         exclude_labels: list[str] = []
@@ -517,7 +585,9 @@ class Orchestrator:
         skip_config_label_exclusions = bool(self._include_labels) or _has_explicit_pytest_selection(
             self._extra_pytest_args
         )
-        resolution_exclude_labels = [] if skip_config_label_exclusions else exclude_labels
+        resolution_exclude_labels = set(self._exclude_labels)
+        if not skip_config_label_exclusions:
+            resolution_exclude_labels.update(exclude_labels)
 
         phase_results: list[PhaseResult] = []
         overall_success = True
@@ -598,7 +668,7 @@ class Orchestrator:
                     phase_entries,
                     requested_phase_names if Phase.ALL not in requested_phases else set(config_phases),
                     set(self._include_labels),
-                    set(resolution_exclude_labels),
+                    resolution_exclude_labels,
                     set(exclude_tests),
                     released_tests,
                 )
@@ -667,7 +737,7 @@ class Orchestrator:
                     remaining_entries,
                     requested_phase_names if Phase.ALL not in requested_phases else set(config_phases),
                     set(self._include_labels),
-                    set(resolution_exclude_labels),
+                    resolution_exclude_labels,
                     set(exclude_tests),
                     released_tests,
                     config_phases,
@@ -792,6 +862,8 @@ class Orchestrator:
             exclude_tests=exclude_tests,
             released_tests=released_tests,
             render_context=self.context.get_accumulated_context(),
+            capability=self._capability,
+            skipped_steps=self._skipped_steps,
         )
 
     def _resolve_remaining_validation_entries(
@@ -860,9 +932,12 @@ class Orchestrator:
     def _detect_platform(self) -> str | None:
         """Detect platform from configuration.
 
-        Checks multiple locations for platform:
-        1. tests.platform (isvctl schema)
+        Checks execution identity without requiring a plain-suite axis key:
+        1. tests.capability (isvctl schema)
         2. Root-level platform (legacy isvtest schema)
+        3. The sole commands mapping key (plain suites)
+        4. The capability context, when the config declares no commands at all,
+           falling back to ``VALIDATIONS_ONLY_PLATFORM`` for a core context
 
         Returns:
             Platform string (e.g., 'kubernetes', 'slurm', 'bare_metal') or None
@@ -870,11 +945,18 @@ class Orchestrator:
         platform = None
 
         # Check isvctl schema location first
-        if self.config.tests and self.config.tests.platform:
-            platform = self.config.tests.platform
+        if self.config.tests and self.config.tests.capability:
+            platform = self.config.tests.capability
         # Fall back to root-level platform (legacy isvtest configs)
         elif hasattr(self.config, "model_extra") and self.config.model_extra:
             platform = self.config.model_extra.get("platform")
+        if not platform and len(self.config.commands) == 1:
+            platform = next(iter(self.config.commands))
+        # A config with no commands names no platform because it drives no lifecycle.
+        # It still has an identity for logs and reports: the environment it asserts
+        # against, when the context names one.
+        if not platform and not self.config.commands:
+            platform = self._capability if self._capability in DECLARABLE_CAPABILITIES else VALIDATIONS_ONLY_PLATFORM
 
         if platform:
             # Normalize 'k8s' to 'kubernetes'

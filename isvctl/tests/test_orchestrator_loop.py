@@ -27,11 +27,14 @@ from isvtest.core.resolution import (
     ValidationEntry,
 )
 
+from isvctl.cli.test import CORE_REQUIREMENT_CONTEXT
 from isvctl.config.schema import PlatformCommands, RunConfig, StepConfig, ValidationConfig
 from isvctl.orchestrator.context import Context
 from isvctl.orchestrator.loop import (
+    VALIDATIONS_ONLY_PLATFORM,
     Orchestrator,
     Phase,
+    _apply_capability_step_gates,
     _entries_missing_from_junit,
     _merge_junit_xmls,
     _write_terminal_junit_xml,
@@ -60,6 +63,20 @@ done
 echo "AWS_SECRET_ACCESS_KEY=super-secret" >&2
 exit 7
 """
+
+
+def test_explicit_step_requires_gate_unbound_lifecycle_steps() -> None:
+    """An unbound teardown step is skipped when its explicit capability does not match."""
+    steps = [
+        StepConfig(name="setup_cluster", command="setup", phase="setup", requires=["kubernetes"]),
+        StepConfig(name="teardown_cluster", command="teardown", phase="teardown", requires=["kubernetes"]),
+    ]
+
+    vm_steps = _apply_capability_step_gates(steps, [], "vm")
+    kubernetes_steps = _apply_capability_step_gates(steps, [], "kubernetes")
+
+    assert all(step.skip for step in vm_steps)
+    assert all(not step.skip for step in kubernetes_steps)
 
 
 def test_python_script_path_falls_back_to_current_working_directory(
@@ -136,12 +153,26 @@ class TestOrchestrator:
                     steps=[StepConfig(name="setup", command="echo", args=["test"], phase="setup")]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
 
         platform = orchestrator._detect_platform()
         assert platform == "kubernetes"
+
+    def test_commandless_run_is_identified_by_its_environment_not_its_context(self) -> None:
+        """A commandless config borrows its identity from the capability, if it names one.
+
+        ``core`` is the CLI's word for "no capability", so it names no environment
+        and must not surface as one in logs and JUnit suite names.
+        """
+        orchestrator = Orchestrator(RunConfig(tests=ValidationConfig()))
+
+        orchestrator._capability = "kubernetes"
+        assert orchestrator._detect_platform() == "kubernetes"
+
+        orchestrator._capability = CORE_REQUIREMENT_CONTEXT
+        assert orchestrator._detect_platform() == VALIDATIONS_ONLY_PLATFORM
 
     def test_run_setup_phase_success(self, tmp_path: Path) -> None:
         """Test successful setup phase execution."""
@@ -164,7 +195,7 @@ EOF
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
 
@@ -193,7 +224,7 @@ EOF
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
 
         result = Orchestrator(config).run(phases=[Phase.SETUP])
@@ -231,7 +262,7 @@ EOF
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
 
         result = Orchestrator(config).run(phases=[Phase.SETUP])
@@ -250,7 +281,7 @@ EOF
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
 
@@ -265,7 +296,7 @@ EOF
         """Test skipping setup phase (platform-level skip)."""
         config = RunConfig(
             commands={"kubernetes": PlatformCommands(skip=True)},
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
 
@@ -287,7 +318,7 @@ EOF
                     phases=["setup", "teardown"],
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
 
@@ -306,7 +337,7 @@ EOF
                     steps=[]  # No steps defined
                 )
             },
-            tests=ValidationConfig(platform="kubernetes", cluster_name="test"),
+            tests=ValidationConfig(capability="kubernetes", cluster_name="test"),
         )
         orchestrator = Orchestrator(config)
 
@@ -334,7 +365,7 @@ EOF
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
 
@@ -359,7 +390,7 @@ EOF
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
 
@@ -373,9 +404,16 @@ EOF
         assert teardown_phases[0].success
 
     def test_platform_detection_missing(self) -> None:
-        """Test error when platform cannot be detected."""
+        """Test error when platform cannot be detected.
+
+        Commands are present, so the run does drive a lifecycle - but nothing says
+        which one, and guessing between them would run the wrong scripts.
+        """
         config = RunConfig(
-            commands={},
+            commands={
+                "kubernetes": PlatformCommands(steps=[StepConfig(name="setup", command="echo", phase="setup")]),
+                "slurm": PlatformCommands(steps=[StepConfig(name="setup", command="echo", phase="setup")]),
+            },
             tests=ValidationConfig(),  # No platform specified
         )
         orchestrator = Orchestrator(config)
@@ -385,12 +423,47 @@ EOF
         assert not result.success
         assert "Cannot determine platform" in result.phases[0].message
 
-    def test_teardown_runs_when_setup_validation_fails(self, tmp_path: Path) -> None:
+    def test_config_without_commands_runs_live_validations_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A suite config can probe an already-running system without a provider lifecycle."""
+        monkeypatch.setattr("isvctl.orchestrator.loop.load_released_test_filter", lambda: None)
+        config = RunConfig(
+            tests=ValidationConfig(
+                validations={
+                    "k8s_storage": {
+                        "checks": {
+                            "K8sCsiStorageTypesCheck": {
+                                "requires": ["kubernetes"],
+                            }
+                        },
+                    }
+                },
+            ),
+        )
+        orchestrator = Orchestrator(config)
+
+        result = orchestrator.run(phases=[Phase.TEST], capability="kubernetes")
+
+        assert result.success
+        assert [phase.phase for phase in result.phases] == [Phase.TEST]
+        assert [entry.entry.name for entry in result.validations] == ["K8sCsiStorageTypesCheck"]
+        assert result.validations[0].state is State.PASSED
+
+    def test_config_without_commands_or_validations_is_not_a_pass(self) -> None:
+        """Validations are all a commandless run has, so wiring none asserts nothing."""
+        orchestrator = Orchestrator(RunConfig(tests=ValidationConfig(validations={})))
+
+        result = orchestrator.run(phases=[Phase.TEST], capability="kubernetes")
+
+        assert not result.success
+        assert "would assert nothing" in result.phases[0].message
+
+    def test_teardown_runs_when_setup_validation_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Teardown must run when setup steps succeed but setup validations fail.
 
         Regression test for issue where validation failures in setup caused
         teardown to be skipped, leaking cloud resources.
         """
+        monkeypatch.setattr("isvctl.orchestrator.loop.load_released_test_filter", lambda: None)
         setup_script = _write_script(tmp_path, "setup.sh", _INVENTORY_SCRIPT)
 
         config = RunConfig(
@@ -403,12 +476,13 @@ EOF
                 )
             },
             tests=ValidationConfig(
-                platform="kubernetes",
+                capability="kubernetes",
                 validations={
                     "setup_checks": {
                         "step": "setup_cluster",
                         "checks": {
-                            "FieldExistsCheck": {
+                            "ClusterFieldPresentCheck": {
+                                "compose": ["FieldExistsCheck"],
                                 "field": "missing_field",
                             }
                         },
@@ -438,7 +512,7 @@ EOF
                     ],
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
         result = orchestrator.run(teardown_on_failure=True)
@@ -475,7 +549,7 @@ EOF
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
         result = orchestrator.run(teardown_on_failure=True)
@@ -487,8 +561,9 @@ EOF
         assert "teardown_nim" in step_names, "first teardown step must be recorded"
         assert "teardown_vm" in step_names, "second teardown step must run despite first failure"
 
-    def test_validation_without_step_output_is_reported_as_skipped(self) -> None:
+    def test_validation_without_step_output_is_reported_as_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A configured validation whose step produced no JSON is skipped visibly."""
+        monkeypatch.setattr("isvctl.orchestrator.loop.load_released_test_filter", lambda: None)
         config = RunConfig(
             commands={
                 "kubernetes": PlatformCommands(
@@ -499,11 +574,11 @@ EOF
                 )
             },
             tests=ValidationConfig(
-                platform="kubernetes",
+                capability="kubernetes",
                 validations={
                     "probe_checks": {
                         "step": "probe",
-                        "checks": {"StepSuccessCheck": {}},
+                        "checks": {"ProbeSucceededCheck": {"compose": ["StepSuccessCheck"]}},
                     },
                 },
             ),
@@ -516,7 +591,7 @@ EOF
         validations = result.phases[0].details["validations"]
         assert validations == [
             {
-                "name": "StepSuccessCheck",
+                "name": "ProbeSucceededCheck",
                 "passed": True,
                 "skipped": True,
                 "message": "step 'probe' did not produce output",
@@ -528,8 +603,11 @@ EOF
             }
         ]
 
-    def test_validation_template_error_is_reported_as_error(self, tmp_path: Path) -> None:
+    def test_validation_template_error_is_reported_as_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Validation parameter render failures are terminal validation errors."""
+        monkeypatch.setattr("isvctl.orchestrator.loop.load_released_test_filter", lambda: None)
         ok_script = _write_script(tmp_path, "ok.sh", _OK_SCRIPT)
         config = RunConfig(
             commands={
@@ -541,11 +619,12 @@ EOF
                 )
             },
             tests=ValidationConfig(
-                platform="kubernetes",
+                capability="kubernetes",
                 validations={
                     "probe_checks": {
                         "checks": {
-                            "FieldExistsCheck": {
+                            "ProbeFieldPresentCheck": {
+                                "compose": ["FieldExistsCheck"],
                                 "field": "{{ missing.value }}",
                             }
                         },
@@ -559,15 +638,18 @@ EOF
 
         assert not result.success
         validation = result.phases[0].details["validations"][0]
-        assert validation["name"] == "FieldExistsCheck"
+        assert validation["name"] == "ProbeFieldPresentCheck"
         assert validation["passed"] is False
         assert validation["skipped"] is False
         assert validation["state"] == "error"
         assert validation["error_reason"] == "template_render_failed"
         assert "failed to render validation parameters" in validation["message"]
 
-    def test_preresolved_skip_and_error_are_written_to_junit(self, tmp_path: Path) -> None:
+    def test_preresolved_skip_and_error_are_written_to_junit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Merged JUnit includes terminal entries that never went through pytest."""
+        monkeypatch.setattr("isvctl.orchestrator.loop.load_released_test_filter", lambda: None)
         ok_script = _write_script(tmp_path, "ok.sh", _OK_SCRIPT)
         junit_path = tmp_path / "junit.xml"
         config = RunConfig(
@@ -581,15 +663,16 @@ EOF
                 )
             },
             tests=ValidationConfig(
-                platform="kubernetes",
+                capability="kubernetes",
                 validations={
                     "skip_checks": {
                         "step": "no_json",
-                        "checks": {"StepSuccessCheck": {}},
+                        "checks": {"ProbeSucceededCheck": {"compose": ["StepSuccessCheck"]}},
                     },
                     "error_checks": {
                         "checks": {
-                            "FieldExistsCheck": {
+                            "ProbeFieldPresentCheck": {
+                                "compose": ["FieldExistsCheck"],
                                 "field": "{{ missing.value }}",
                             }
                         },
@@ -603,12 +686,12 @@ EOF
 
         root = ET.parse(junit_path).getroot()
         cases = {case.attrib["name"]: case for case in root.iter("testcase")}
-        assert "StepSuccessCheck" in cases
-        assert cases["StepSuccessCheck"].find("skipped") is not None
-        assert cases["StepSuccessCheck"].find("skipped").attrib["type"] == "step_no_output"
-        assert "FieldExistsCheck" in cases
-        assert cases["FieldExistsCheck"].find("error") is not None
-        assert cases["FieldExistsCheck"].find("error").attrib["type"] == "template_render_failed"
+        assert "ProbeSucceededCheck" in cases
+        assert cases["ProbeSucceededCheck"].find("skipped") is not None
+        assert cases["ProbeSucceededCheck"].find("skipped").attrib["type"] == "step_no_output"
+        assert "ProbeFieldPresentCheck" in cases
+        assert cases["ProbeFieldPresentCheck"].find("error") is not None
+        assert cases["ProbeFieldPresentCheck"].find("error").attrib["type"] == "template_render_failed"
 
 
 class TestLabelFiltering:
@@ -643,7 +726,7 @@ class TestLabelFiltering:
                 )
             },
             tests=ValidationConfig(
-                platform="kubernetes",
+                capability="kubernetes",
                 validations={"cluster": {"checks": {"K8sNodeCountCheck": {"labels": ["kubernetes"]}}}},
                 exclude={"labels": exclude_labels} if exclude_labels else {},
             ),
@@ -731,7 +814,7 @@ class TestTeardownOnlyPhase:
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
         result = orchestrator.run(phases=[Phase.TEARDOWN])
@@ -761,7 +844,7 @@ class TestTeardownOnlyPhase:
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
         result = orchestrator.run(phases=[Phase.SETUP, Phase.TEARDOWN])
@@ -782,7 +865,7 @@ class TestTeardownOnlyPhase:
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
         result = orchestrator.run(phases=[Phase.TEARDOWN])
@@ -803,7 +886,7 @@ class TestTeardownOnlyPhase:
                     ]
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
         result = orchestrator.run(phases=[Phase.TEARDOWN])
@@ -829,7 +912,7 @@ class TestTeardownOnlyPhase:
                     ],
                 )
             },
-            tests=ValidationConfig(platform="kubernetes"),
+            tests=ValidationConfig(capability="kubernetes"),
         )
         orchestrator = Orchestrator(config)
         result = orchestrator.run(phases=[Phase.SETUP, Phase.TEARDOWN], teardown_on_failure=True)

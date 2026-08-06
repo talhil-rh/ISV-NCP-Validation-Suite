@@ -37,7 +37,6 @@ version: "1.0"
 tests:
   cluster_name: "image-registry-validation"
   description: "Image registry validation tests"
-  platform: image_registry
 
   settings:
     # Provider-specific - override in your provider config
@@ -54,107 +53,122 @@ tests:
     image_upload:
       step: upload_image
       checks:
-        StepSuccessCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-        FieldExistsCheck:
+        CustomOsImageUploadedCheck:
           test_id: "BOOT01-01"
           labels: ["image_registry", "min_req"]
-          fields: ["image_id", "storage_bucket", "disk_ids"]
+          requires: []
+          description: "Check a custom OS image is uploaded and registered with its disks"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["image_id", "storage_bucket", "disk_ids"]
 
     # --- Image CRUD ---
     image_crud:
       step: crud_image
       checks:
-        StepSuccessCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-        FieldExistsCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-          fields: ["image_id", "operations"]
-        CrudOperationsCheck:
+        CustomOsImageCrudCheck:
           test_id: "BOOT03-02"
           labels: ["image_registry", "min_req"]
-          operations: ["get", "list", "create", "delete"]
+          requires: []
+          description: "Check custom OS images support get, list, create, and delete"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["image_id", "operations"]
+            - CrudOperationsCheck:
+                operations: ["get", "list", "create", "delete"]
 
     # --- VM Launch from Image ---
     vm_from_image:
       step: launch_instance
       checks:
-        StepSuccessCheck:
+        VmBootedFromCustomImageCheck:
           test_id: "BOOT01-05"
           labels: ["image_registry", "min_req"]
-        FieldExistsCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-          fields: ["instance_id", "public_ip", "key_path"]
-        InstanceStateCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-          expected_state: "running"
+          requires: [vm]
+          description: "Check a VM launches from the custom image and reaches the running state"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["instance_id", "public_ip", "key_path"]
+            - InstanceStateCheck:
+                expected_state: "running"
 
     vm_ssh:
       step: launch_instance
       checks:
-        ConnectivityCheck:
+        VmFromCustomImageReadyCheck:
           test_id: "N/A"
           labels: ["image_registry", "ssh"]
-        OsCheck:
-          test_id: "N/A"
-          labels: ["image_registry", "ssh"]
-          expected_os: "ubuntu"
+          requires: [vm]
+          description: "Check the VM booted from the custom image answers SSH and reports the expected OS"
+          compose:
+            - ConnectivityCheck
+            - OsCheck:
+                expected_os: "ubuntu"
 
     # --- OS Install Config CRUD ---
     install_config_crud:
       step: crud_install_config
       checks:
-        StepSuccessCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-        FieldExistsCheck:
+        OsInstallConfigCrudCheck:
           test_id: "BOOT01-02"
           labels: ["image_registry"]
-          fields: ["config_id", "config_name", "operations"]
+          requires: []
+          description: "Check an OS install configuration can be created and managed"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["config_id", "config_name", "operations"]
+            - CrudOperationsCheck:
+                operations: ["create", "read", "update", "delete"]
 
     # --- OS Image on BMaaS ---
     bm_from_image:
       step: install_image_bm
       checks:
-        StepSuccessCheck:
+        BmHostBootedFromCustomImageCheck:
           test_id: "BOOT01-03"
-          labels: ["image_registry", "min_req"]
-        FieldExistsCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-          fields: ["instance_id", "image_id", "instance_state"]
-        InstanceStateCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-          expected_state: "running"
+          labels: ["bare_metal", "image_registry", "min_req"]
+          requires: [bare_metal]
+          description: "Check a bare metal host installs the custom OS image and reaches the running state"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["instance_id", "image_id", "instance_state"]
+            - InstanceStateCheck:
+                expected_state: "running"
 
     # --- OS Install Config on BMaaS ---
     bm_from_config:
       step: install_config_bm
       checks:
-        StepSuccessCheck:
+        BmHostBootedFromInstallConfigCheck:
           test_id: "BOOT01-04"
           labels: ["image_registry", "min_req"]
-        FieldExistsCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-          fields: ["instance_id", "config_id", "instance_state"]
-        InstanceStateCheck:
-          test_id: "N/A"
-          labels: ["image_registry"]
-          expected_state: "running"
+          requires: [bare_metal]
+          description: "Check a bare metal host installs from the OS install configuration and reaches the running state"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["instance_id", "config_id", "instance_state"]
+            - InstanceStateCheck:
+                expected_state: "running"
 
+    # Bound to the image half of teardown: it is ungated, so this stays a core
+    # check. The instance half (teardown_instance) only runs under vm and owns
+    # nothing an ISV must prove, so it carries no check of its own.
     teardown_checks:
-      step: teardown
+      step: teardown_image
       checks:
-        StepSuccessCheck:
+        CustomOsImageDeletedCheck:
           test_id: "N/A"
           labels: ["image_registry"]
+          requires: []
+          description: "Check the uploaded image and its artifacts are deleted"
+          compose:
+            - StepSuccessCheck
 
   exclude:
     labels: []

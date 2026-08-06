@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Require ``test_id`` and ``labels`` on every check wired in suite YAML.
+"""Validate suite identity and check resolution in canonical and provider YAML.
 
 Suite configs under ``isvctl/configs/suites/`` are the source of truth for
 validation metadata on this branch. Each wired check must declare:
@@ -24,6 +24,18 @@ validation metadata on this branch. Each wired check must declare:
 * ``labels`` - a non-empty list used for pytest selection and catalog reporting.
   Each canonical suite check must include its suite label, for example checks in
   ``bare_metal.yaml`` must include ``bare_metal``.
+
+A check wired with ``compose`` is a composite: it names no validation class of
+its own, so it must supply the ``description`` the catalog would otherwise take
+from a class, and every name in its ``compose`` list must be a real check.
+
+Checks marked ``compose_only`` (``StepSuccessCheck`` and friends) assert
+something generic, so their class name would be a poor catalog identity. They
+may only be reached from inside a ``compose`` list.
+
+Provider configs are validated after resolving their imports. This catches
+overrides that accidentally replace a canonical composite's metadata, as well
+as provider-only checks that bypass the canonical suite guardrails.
 
 Usage:
     python3 scripts/validate_suite_wiring.py
@@ -37,27 +49,27 @@ import re
 import sys
 from collections import defaultdict
 from collections.abc import Iterator
+from functools import cache
 from pathlib import Path
 from typing import Any
 
 import yaml
+from isvctl.config.merger import merge_yaml_files
+from isvtest.catalog import iter_checks_from_data
+from isvtest.core.composite import COMPOSE_KEY, composed_members, is_composite
+from isvtest.core.discovery import discover_all_tests
+from isvtest.core.resolution import (
+    DECLARABLE_CAPABILITIES,
+    canonical_suite_name,
+    parse_validations,
+    requires_error,
+    resolve_class_key,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUITES_DIR = REPO_ROOT / "isvctl" / "configs" / "suites"
+PROVIDERS_DIR = REPO_ROOT / "isvctl" / "configs" / "providers"
 _NEXT_CATEGORY_LINE = re.compile(r"^    \S")
-SUITE_REQUIRED_LABELS: dict[str, str] = {
-    "bare_metal": "bare_metal",
-    "control-plane": "control_plane",
-    "iam": "iam",
-    "image-registry": "image_registry",
-    "k8s": "kubernetes",
-    "network": "network",
-    "observability": "observability",
-    "security": "security",
-    "slurm": "slurm",
-    "storage": "storage",
-    "vm": "vm",
-}
 
 
 def _check_line_patterns(check_name: str) -> tuple[re.Pattern[str], ...]:
@@ -105,7 +117,48 @@ def _normalize_test_id(value: Any) -> str | None:
 
 def required_suite_label(config_path: Path) -> str | None:
     """Return the label every check in a known canonical suite must carry."""
-    return SUITE_REQUIRED_LABELS.get(config_path.stem)
+    return canonical_suite_name(config_path.stem)
+
+
+@cache
+def discovered_check_names() -> frozenset[str]:
+    """Return the names of every discoverable validation class."""
+    return frozenset(cls.__name__ for cls in discover_all_tests())
+
+
+@cache
+def compose_only_check_names() -> frozenset[str]:
+    """Return the checks that may only be reached from inside a composite."""
+    return frozenset(cls.__name__ for cls in discover_all_tests() if getattr(cls, "compose_only", False))
+
+
+def composite_errors(location: str, name: str, params: dict[str, Any]) -> list[str]:
+    """Return errors for a check wired with ``compose``.
+
+    A composite borrows nothing from a validation class, so what a class would
+    have supplied - a name of its own and a description - has to be declared and
+    checked here instead.
+    """
+    known = discovered_check_names()
+    errors: list[str] = []
+
+    if name in known:
+        errors.append(f"{location}: composite name shadows validation class {name!r}; give the composite its own name")
+    if not isinstance(params.get("description"), str) or not params["description"].strip():
+        errors.append(f"{location}: composite requires a description (it becomes the catalog description)")
+
+    raw = params[COMPOSE_KEY]
+    if not isinstance(raw, list) or not raw:
+        errors.append(f"{location}: {COMPOSE_KEY} must be a non-empty list of check names")
+        return errors
+
+    members = composed_members(raw)
+    if len(members) != len(raw):
+        errors.append(f"{location}: each {COMPOSE_KEY} item must be 'CheckName' or 'CheckName: {{params}}'")
+    for member_name, _ in members:
+        if member_name not in known:
+            errors.append(f"{location}: {COMPOSE_KEY} names unknown check {member_name!r}")
+    return errors
 
 
 def iter_suite_checks(config_path: Path) -> Iterator[tuple[str, str, dict[str, Any]]]:
@@ -114,28 +167,7 @@ def iter_suite_checks(config_path: Path) -> Iterator[tuple[str, str, dict[str, A
         data = yaml.safe_load(config_path.read_text())
     except (OSError, yaml.YAMLError) as exc:
         raise ValueError(f"failed to read/parse {config_path}: {exc}") from exc
-
-    validations = (data or {}).get("tests", {}).get("validations", {})
-    if not isinstance(validations, dict):
-        return
-
-    def _from_mapping(category: str, mapping: Any) -> Iterator[tuple[str, str, dict[str, Any]]]:
-        """Yield wired checks from a dict- or list-form ``checks`` mapping."""
-        if isinstance(mapping, dict):
-            for name, params in mapping.items():
-                yield category, name, params if isinstance(params, dict) else {}
-
-    for category, cat_config in validations.items():
-        if isinstance(cat_config, dict) and "checks" in cat_config:
-            checks_val = cat_config["checks"]
-            if isinstance(checks_val, dict):
-                yield from _from_mapping(category, checks_val)
-            elif isinstance(checks_val, list):
-                for check in checks_val:
-                    yield from _from_mapping(category, check)
-        elif isinstance(cat_config, list):
-            for check in cat_config:
-                yield from _from_mapping(category, check)
+    yield from iter_checks_from_data(data)
 
 
 def _format_location(config_path: Path, category: str, check_name: str, line_number: int | None) -> str:
@@ -153,14 +185,52 @@ def wiring_errors(suites_dir: Path = SUITES_DIR) -> list[str]:
     """Return human-readable errors for incomplete suite check wiring."""
     errors: list[str] = []
     occurrence: dict[tuple[Path, str, str], int] = defaultdict(int)
+    wiring_locations: dict[str, str] = {}
 
+    # Read and parse each suite once; both the dead-requirement pre-pass and the
+    # per-check loop below work off these parsed documents.
+    parsed: list[tuple[Path, list[str], dict[str, Any]]] = []
     for path in sorted(suites_dir.glob("*.yaml")):
         try:
-            lines = path.read_text().splitlines()
-            checks = list(iter_suite_checks(path))
-        except ValueError as exc:
-            errors.append(str(exc))
+            text = path.read_text()
+            parsed.append((path, text.splitlines(), yaml.safe_load(text) or {}))
+        except (OSError, yaml.YAMLError) as exc:
+            errors.append(f"failed to read/parse {path}: {exc}")
+
+    # A `requires` value is only satisfiable if an ISV can declare that
+    # capability, which requires a platform suite to exist for it. Collect the
+    # capabilities that actually have a suite so unreachable (dead)
+    # requirements can be flagged below.
+    declared_capabilities: set[str] = set()
+    for _, _, data in parsed:
+        tests = data.get("tests") if isinstance(data, dict) else None
+        capability = tests.get("capability") if isinstance(tests, dict) else None
+        if isinstance(capability, str) and capability in DECLARABLE_CAPABILITIES:
+            declared_capabilities.add(capability)
+
+    for path, lines, data in parsed:
+        try:
+            checks = list(iter_checks_from_data(data))
+        except (ValueError, AttributeError) as exc:
+            errors.append(f"failed to read/parse {path}: {exc}")
             continue
+        tests = data.get("tests") or {}
+        capability = tests.get("capability") if isinstance(tests, dict) else None
+        module = tests.get("module") if isinstance(tests, dict) else None
+        if module is not None:
+            errors.append(f"{path}: tests.module is no longer supported")
+        if isinstance(tests, dict) and tests.get("platform") is not None:
+            errors.append(f"{path}: tests.platform was renamed to tests.capability")
+        if capability is not None and capability not in DECLARABLE_CAPABILITIES:
+            errors.append(f"{path}: tests.capability must be one of: {', '.join(sorted(DECLARABLE_CAPABILITIES))}")
+        suite_is_platform = isinstance(capability, str) and capability in DECLARABLE_CAPABILITIES
+        if not suite_is_platform:
+            suite_name = canonical_suite_name(path.stem)
+            if suite_name in DECLARABLE_CAPABILITIES:
+                errors.append(
+                    f"{path}: plain suite name {suite_name!r} collides with a declarable "
+                    "capability; rename the file so capability and suite namespaces stay disjoint"
+                )
         for category, name, params in checks:
             key = (path, category, name)
             line_numbers = find_check_line_numbers(lines, category, name)
@@ -171,12 +241,97 @@ def wiring_errors(suites_dir: Path = SUITES_DIR) -> list[str]:
             test_id = _normalize_test_id(params.get("test_id"))
             labels = _normalize_labels(params.get("labels"))
             required_label = required_suite_label(path)
+            previous_location = wiring_locations.get(name)
+            if previous_location:
+                errors.append(f"{location}: wiring name is not globally unique (also at {previous_location})")
+            else:
+                wiring_locations[name] = location
+            if is_composite(params):
+                errors.extend(composite_errors(location, name, params))
+            elif generic := resolve_class_key(name, compose_only_check_names()):
+                errors.append(
+                    f"{location}: {generic} is a generic check and may only appear in a composite's "
+                    f"{COMPOSE_KEY} list; name what the test proves and compose it"
+                )
             if test_id is None:
                 errors.append(f'{location}: missing test_id (use a plan id or "N/A")')
             if not labels:
                 errors.append(f"{location}: missing labels (non-empty list required)")
             elif required_label and required_label not in labels:
                 errors.append(f"{location}: missing suite label {required_label!r}")
+            if "platforms" in params:
+                errors.append(f"{location}: legacy platforms is not supported; use requires in plain suites")
+            if capability:
+                if "requires" in params:
+                    errors.append(f"{location}: requires is not allowed in platform suites")
+            else:
+                requires = params.get("requires")
+                if not isinstance(requires, list):
+                    errors.append(f"{location}: missing requires (use [] for core checks)")
+                elif message := requires_error(requires):
+                    errors.append(f"{location}: {message}")
+                else:
+                    dead = sorted(set(requires) - declared_capabilities)
+                    if dead:
+                        errors.append(
+                            f"{location}: requires names {', '.join(dead)} which has no platform "
+                            "suite; no ISV can declare it, so the check is unreachable"
+                        )
+    return errors
+
+
+def provider_wiring_errors(providers_dir: Path = PROVIDERS_DIR) -> list[str]:
+    """Return errors in provider validations after imports and overrides merge."""
+    errors: list[str] = []
+    known = discovered_check_names()
+    generic_names = compose_only_check_names()
+
+    for path in sorted(providers_dir.rglob("*.yaml")):
+        try:
+            data = merge_yaml_files([path])
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            errors.append(f"failed to read/merge {path}: {exc}")
+            continue
+
+        tests = data.get("tests") if isinstance(data, dict) else None
+        validations = tests.get("validations") if isinstance(tests, dict) else None
+        if not isinstance(validations, dict):
+            continue
+
+        try:
+            entries = parse_validations(validations)
+        except (ValueError, AttributeError) as exc:
+            errors.append(f"failed to parse merged validations in {path}: {exc}")
+            continue
+
+        locations: dict[str, str] = {}
+        for entry in entries:
+            location = _format_location(path, entry.category, entry.name, None)
+            previous_location = locations.get(entry.name)
+            if previous_location:
+                errors.append(
+                    f"{location}: wiring name is not unique in merged provider config (also at {previous_location})"
+                )
+            else:
+                locations[entry.name] = location
+
+            params = entry.params_template
+            if not isinstance(params, dict):
+                errors.append(f"{location}: check parameters must be a mapping")
+                continue
+            if is_composite(params):
+                errors.extend(composite_errors(location, entry.name, params))
+            elif generic := resolve_class_key(entry.name, generic_names):
+                errors.append(
+                    f"{location}: {generic} is a generic check and may only appear in a composite's "
+                    f"{COMPOSE_KEY} list; name what the test proves and compose it"
+                )
+            elif resolve_class_key(entry.name, known) is None:
+                errors.append(
+                    f"{location}: names unknown validation {entry.name!r}; "
+                    "an override may have replaced composite metadata"
+                )
+
     return errors
 
 
@@ -186,11 +341,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Exit 1 when any suite check is missing test_id or labels.",
+        help=(
+            "Exit 1 on wiring violations (missing test_id/labels, unregistered suites, "
+            "or isvreporter platform mismatches)."
+        ),
     )
     args = parser.parse_args(argv)
 
-    errors = wiring_errors()
+    errors = [*wiring_errors(), *provider_wiring_errors()]
     if errors:
         header = f"suite wiring validation failed ({len(errors)} issue(s)):"
         message = header + "\n  " + "\n  ".join(errors)
@@ -200,7 +358,10 @@ def main(argv: list[str] | None = None) -> int:
         print(message)
         return 0
 
-    ok = f"OK: all wired checks in {SUITES_DIR.relative_to(REPO_ROOT)} declare test_id, labels, and suite labels."
+    ok = (
+        f"OK: canonical checks in {SUITES_DIR.relative_to(REPO_ROOT)} have valid metadata "
+        f"and merged configs in {PROVIDERS_DIR.relative_to(REPO_ROOT)} resolve."
+    )
     print(ok)
     return 0
 

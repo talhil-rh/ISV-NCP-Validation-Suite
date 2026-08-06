@@ -394,11 +394,11 @@ class TestDictChecksDeepMerge:
     def test_add_new_check(self) -> None:
         """Provider can add a new check to an existing group."""
         template = {"tests": {"validations": {"gpu": {"checks": {"GpuCheck": {"expected_gpus": 8}}}}}}
-        provider = {"tests": {"validations": {"gpu": {"checks": {"GpuStressCheck": {"runtime": 30}}}}}}
+        provider = {"tests": {"validations": {"gpu": {"checks": {"BmGpuStressCheck": {"runtime": 30}}}}}}
         result = deep_merge(template, provider)
         checks = result["tests"]["validations"]["gpu"]["checks"]
         assert "GpuCheck" in checks
-        assert "GpuStressCheck" in checks
+        assert "BmGpuStressCheck" in checks
 
     def test_add_new_validation_group(self) -> None:
         """Provider can add an entirely new validation group."""
@@ -437,23 +437,25 @@ class TestImportEndToEnd:
         assert "credentials" in validations
         assert "teardown_checks" in validations
         assert result["tests"]["cluster_name"] == "aws-iam-validation"
-        assert result["tests"]["platform"] == "iam"
+        assert "platform" not in result["tests"]
+        assert list(result["commands"]) == ["iam"]
 
-    def test_my_isv_observability_declares_raw_platform_for_report_upload(self) -> None:
-        """Raw observability config exposes platform for upload paths that skip imports."""
+    def test_my_isv_observability_is_a_plain_suite(self) -> None:
+        """Plain-suite provider configs do not recreate a platform axis."""
         config_path = self.CONFIGS_DIR / "providers" / "my-isv" / "config" / "observability.yaml"
 
         raw_config = yaml.safe_load(config_path.read_text()) or {}
-        assert raw_config.get("tests", {}).get("platform") == "observability"
+        assert "platform" not in raw_config.get("tests", {})
 
         result = merge_yaml_files([config_path])
-        assert result["tests"]["platform"] == "observability"
+        assert "platform" not in result["tests"]
+        assert list(result["commands"]) == ["observability"]
 
     def test_aws_observability_inherits_supported_validations(self) -> None:
         """AWS observability imports the canonical suite and wires supported steps."""
         result = merge_yaml_files([self.CONFIGS_DIR / "providers" / "aws" / "config" / "observability.yaml"])
 
-        assert result["tests"]["platform"] == "observability"
+        assert "platform" not in result["tests"]
         assert result["tests"]["cluster_name"] == "aws-observability-validation"
 
         steps = result["commands"]["observability"]["steps"]
@@ -578,7 +580,7 @@ class TestImportEndToEnd:
         assert context.render_string(exclude_selector) == "isv.ncp.validation/pool=test"
         assert context.render_string(total_gpu_count) == "2"
         assert context.render_string(expected_total) == "2"
-        assert result["tests"]["platform"] == "kubernetes"
+        assert result["tests"]["capability"] == "kubernetes"
 
     def test_aws_eks_does_not_hardcode_world_open_endpoint_allowlist(self) -> None:
         """EKS setup must not create clusters that make the security suite fail."""
@@ -589,12 +591,14 @@ class TestImportEndToEnd:
         assert "TF_VAR_cluster_endpoint_public_access_cidrs" not in setup_env
         assert "0.0.0.0/0" not in str(setup_step)
 
-    def test_aws_bare_metal_overrides_serial_console_retention_check(self) -> None:
-        """AWS BM must not inherit the retention check until archive evidence exists."""
+    def test_aws_bare_metal_excludes_serial_console_retention_check(self) -> None:
+        """AWS BM preserves the composite and excludes only unsupported retention."""
         result = merge_yaml_files([self.CONFIGS_DIR / "providers" / "aws" / "config" / "bare_metal.yaml"])
 
         checks = result["tests"]["validations"]["serial_console"]["checks"]
-        assert checks == [{"SerialConsoleCheck": {}}]
+        assert checks["BmSerialConsoleCheck"]["compose"] == ["SerialConsoleCheck"]
+        assert "SerialConsoleRetentionCheck" in checks
+        assert "SerialConsoleRetentionCheck" in result["tests"]["exclude"]["tests"]
 
     def test_microk8s_inherits_k8s_validations(self) -> None:
         """providers/microk8s.yaml imports suites/k8s.yaml and adds overrides."""

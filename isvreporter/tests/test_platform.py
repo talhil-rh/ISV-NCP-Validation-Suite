@@ -23,6 +23,7 @@ from isvreporter.platform import (
     KUBERNETES,
     OBSERVABILITY,
     SLURM,
+    STORAGE,
     get_platform_from_config,
     is_valid_platform,
     normalize_platform,
@@ -74,6 +75,12 @@ class TestNormalizePlatform:
         assert normalize_platform("OBSERVABILITY") == OBSERVABILITY
         assert normalize_platform("Observability") == OBSERVABILITY
 
+    def test_normalize_storage(self) -> None:
+        """Test that storage normalizes correctly."""
+        assert normalize_platform("storage") == STORAGE
+        assert normalize_platform("STORAGE") == STORAGE
+        assert normalize_platform("Storage") == STORAGE
+
     def test_normalize_empty_and_none(self) -> None:
         """Test that empty/None returns default platform."""
         assert normalize_platform(None) == DEFAULT_PLATFORM
@@ -103,6 +110,7 @@ class TestIsValidPlatform:
         assert is_valid_platform("bare-metal") is True
         assert is_valid_platform("bm") is True
         assert is_valid_platform("observability") is True
+        assert is_valid_platform("storage") is True
 
     def test_valid_platforms_case_insensitive(self) -> None:
         """Test that platform validation is case insensitive."""
@@ -126,19 +134,24 @@ class TestGetPlatformFromConfig:
     """Tests for get_platform_from_config function."""
 
     def test_valid_config_with_platform(self, tmp_path: Path) -> None:
-        """Test reading platform from valid config."""
-        config = _write_config(tmp_path, "tests:\n  platform: slurm\n")
+        """Test reading the declared capability from a valid config."""
+        config = _write_config(tmp_path, "tests:\n  capability: slurm\n")
         assert get_platform_from_config(str(config)) == SLURM
 
     def test_config_with_k8s_alias(self, tmp_path: Path) -> None:
         """Test reading k8s alias from config."""
-        config = _write_config(tmp_path, "tests:\n  platform: k8s\n")
+        config = _write_config(tmp_path, "tests:\n  capability: k8s\n")
         assert get_platform_from_config(str(config)) == KUBERNETES
 
     def test_config_with_observability(self, tmp_path: Path) -> None:
         """Test reading observability from config."""
-        config = _write_config(tmp_path, "tests:\n  platform: observability\n")
+        config = _write_config(tmp_path, "tests:\n  capability: observability\n")
         assert get_platform_from_config(str(config)) == OBSERVABILITY
+
+    def test_config_with_storage(self, tmp_path: Path) -> None:
+        """Test reading storage from config."""
+        config = _write_config(tmp_path, "tests:\n  capability: storage\n")
+        assert get_platform_from_config(str(config)) == STORAGE
 
     def test_config_without_tests_section(self, tmp_path: Path) -> None:
         """Test that missing tests section returns default."""
@@ -146,7 +159,7 @@ class TestGetPlatformFromConfig:
         assert get_platform_from_config(str(config)) == DEFAULT_PLATFORM
 
     def test_config_without_platform(self, tmp_path: Path) -> None:
-        """Test that missing platform field returns default."""
+        """Test that a missing capability field returns default."""
         config = _write_config(tmp_path, "tests:\n  labels: [unit]\n")
         assert get_platform_from_config(str(config)) == DEFAULT_PLATFORM
 
@@ -162,5 +175,5 @@ class TestGetPlatformFromConfig:
 
     def test_accepts_path_object(self, tmp_path: Path) -> None:
         """Test that Path objects are accepted."""
-        config = _write_config(tmp_path, "tests:\n  platform: kubernetes\n")
+        config = _write_config(tmp_path, "tests:\n  capability: kubernetes\n")
         assert get_platform_from_config(config) == KUBERNETES

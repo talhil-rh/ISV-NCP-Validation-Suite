@@ -64,6 +64,7 @@ def _entry(
     step: str | None = None,
     phase: str | None = None,
     labels: tuple[str, ...] = (),
+    requires: tuple[str, ...] = (),
 ) -> ValidationEntry:
     """Build a minimal validation entry."""
     return ValidationEntry(
@@ -73,6 +74,7 @@ def _entry(
         step=step,
         phase=phase,
         labels=labels,
+        requires=requires,
     )
 
 
@@ -87,6 +89,8 @@ def _resolve(
     exclude_tests: set[str] | None = None,
     released_tests: set[str] | None = None,
     render_context: dict[str, Any] | None = None,
+    capability: str | None = None,
+    skipped_steps: set[str] | None = None,
 ) -> ResolvedEntry:
     """Resolve one entry and return the single result."""
     results = resolve_entries(
@@ -99,9 +103,49 @@ def _resolve(
         exclude_tests=set() if exclude_tests is None else exclude_tests,
         released_tests=released_tests,
         render_context={} if render_context is None else render_context,
+        capability=capability,
+        skipped_steps=set() if skipped_steps is None else skipped_steps,
     )
     assert len(results) == 1
     return results[0]
+
+
+def test_any_declared_requirement_satisfies_capability_filter() -> None:
+    """Orthogonal platform requirements use OR semantics."""
+    entry = _entry(requires=("vm", "bare_metal"))
+
+    assert _resolve(entry, capability="vm").is_ready
+    assert _resolve(entry, capability="bare_metal").is_ready
+    assert _resolve(_entry(requires=()), capability="kubernetes").is_ready
+
+
+def test_capability_filter_has_explicit_skip_reason() -> None:
+    """An unmet prerequisite reports both the requirement and active context."""
+    resolved = _resolve(_entry(requires=("vm", "bare_metal")), capability="kubernetes")
+
+    assert resolved.state == State.SKIPPED
+    assert resolved.skip_reason == SkipReason.CAPABILITY_REQUIREMENT
+    assert resolved.message == "requires vm, bare_metal (context: kubernetes)"
+
+
+def test_omitted_capability_disables_requirement_filtering() -> None:
+    """Local development without a capability context runs every check."""
+    assert _resolve(_entry(requires=("kubernetes",)), capability=None).is_ready
+
+
+def test_a_skipped_step_is_distinguished_from_an_unconfigured_one() -> None:
+    """Both are absent from step_phases, but only one is actionable.
+
+    A step carrying ``skip: true`` is switched off in this config and can be
+    turned back on; a step the provider never declares cannot.
+    """
+    switched_off = _resolve(_entry(step="reinstall"), step_phases={}, skipped_steps={"reinstall"})
+    absent = _resolve(_entry(step="reinstall"), step_phases={})
+
+    assert switched_off.skip_reason == SkipReason.STEP_SKIPPED
+    assert switched_off.message == "step 'reinstall' is configured but skipped (skip: true)"
+    assert absent.skip_reason == SkipReason.STEP_NOT_CONFIGURED
+    assert absent.message == "step 'reinstall' is not configured for this run"
 
 
 @pytest.mark.parametrize(
@@ -111,6 +155,11 @@ def _resolve(
         (_entry("PlainCheck"), {"exclude_tests": {"PlainCheck"}}, SkipReason.EXCLUDED),
         (_entry("LabelCheck", labels=("accelerator",)), {"exclude_labels": {"accelerator"}}, SkipReason.EXCLUDED),
         (_entry(step="create_cluster"), {"step_phases": {}}, SkipReason.STEP_NOT_CONFIGURED),
+        (
+            _entry(step="create_cluster"),
+            {"step_phases": {}, "skipped_steps": {"create_cluster"}},
+            SkipReason.STEP_SKIPPED,
+        ),
         (
             _entry(step="create_cluster"),
             {"step_phases": {"create_cluster": "test"}, "step_outputs": {}},
@@ -395,3 +444,25 @@ def test_resolve_entries_warns_when_default_filter_masks_missing_step_field(
 
     assert "default(" in caplog.text, "default(...) wrapper should log a warning when masking Undefined"
     assert "node_count_invalid" in caplog.text, "warning must surface the missing field name"
+
+
+def test_resolve_entries_is_quiet_when_the_run_has_no_steps(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validation-only run has no steps, so a step reference cannot be a typo.
+
+    The suites wire provider step output behind ``default(...)`` so the same
+    check also runs against a system that is already up. Warning once per
+    reference there buries the results under a page of identical lines.
+    """
+    monkeypatch.setattr(logging.getLogger("isvtest"), "propagate", True)
+
+    entry = _entry(params={"storage_class": "{{ steps.setup_cluster.csi.block_sc | default('', true) }}"})
+
+    with caplog.at_level("WARNING", logger="isvtest.core.resolution"):
+        resolved = _resolve(entry, render_context={"steps": {}})
+
+    assert resolved.rendered_params is not None
+    assert resolved.rendered_params["storage_class"] == ""
+    assert "default(" not in caplog.text

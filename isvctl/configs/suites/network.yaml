@@ -37,7 +37,6 @@ version: "1.0"
 tests:
   cluster_name: "network-validation"
   description: "Network validation tests"
-  platform: network
 
   settings:
     # Provider-specific - override in your provider config
@@ -53,37 +52,102 @@ tests:
         NetworkProvisionedCheck:
           test_id: "N/A"
           labels: ["network"]
+          requires: []
           require_subnets: true
           min_subnets: 2
+
+    # Read-only inventory of networks the platform already exposes. Platforms
+    # that hand out pre-provisioned VPCs instead of letting a tenant create them
+    # can wire these steps and skip the lifecycle checks below.
+    network_inventory:
+      checks:
+        # No plan item for listing networks; SDN01-01..04 are the VPC
+        # create/retrieve/update/delete lifecycle.
+        VpcListedCheck:
+          test_id: "N/A"
+          labels: ["network"]
+          requires: []
+          step: list_vpcs
+          description: "Check the platform lists its VPCs, including the one under test"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["vpcs", "count"]
+            - FieldValueCheck:
+                field: "found_target"
+                expected: true
+        # SDN01-02 (retrieve a VPC) via a standalone read of a pre-provisioned
+        # VPC, for platforms that cannot run the vpc_crud lifecycle VpcReadCheck
+        # asserts. Same requirement, different evidence path.
+        VpcReadFromInventoryCheck:
+          test_id: "SDN01-02"
+          labels: ["min_req", "network"]
+          requires: []
+          step: get_vpc
+          description: "Check the platform reports the identity of a single VPC"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["vpc_id", "vpc_name"]
+        # No plan item for subnet presence: SDN04-01 is exclusive-subnet
+        # isolation, which reading the VPC's subnet list does not establish.
+        VpcContainsExpectedSubnetCheck:
+          test_id: "N/A"
+          labels: ["network"]
+          requires: []
+          step: subnet_assignment
+          description: "Check the VPC under test has the subnet it is expected to carry"
+          compose:
+            - StepSuccessCheck
+            - FieldValueCheck:
+                field: "tests.subnet_assigned.passed"
+                expected: true
 
     network:
       checks:
         # VPC CRUD is split per operation so each maps to one plan id; all four
         # bind to the same vpc_crud step and assert their slice of its output.
-        VpcCrudCheck-create:
+        VpcCreatedCheck:
           test_id: "SDN01-01"
           labels: ["min_req", "network"]
+          requires: []
           step: vpc_crud
-          operations: ["create_vpc"]
-        VpcCrudCheck-read:
+          description: "Check a VPC can be created"
+          compose:
+            - VpcCrudCheck:
+                operations: ["create_vpc"]
+        VpcReadCheck:
           test_id: "SDN01-02"
           labels: ["min_req", "network"]
+          requires: []
           step: vpc_crud
-          operations: ["read_vpc"]
-        VpcCrudCheck-update:
+          description: "Check a VPC can be retrieved after it is created"
+          compose:
+            - VpcCrudCheck:
+                operations: ["read_vpc"]
+        VpcUpdatedCheck:
           test_id: "SDN01-03"
           labels: ["min_req", "network"]
+          requires: []
           step: vpc_crud
-          operations: ["update_tags", "update_dns"]
-        VpcCrudCheck-delete:
+          description: "Check a VPC's tags and DNS settings can be updated"
+          compose:
+            - VpcCrudCheck:
+                operations: ["update_tags", "update_dns"]
+        VpcDeletedCheck:
           test_id: "SDN01-04"
           labels: ["min_req", "network"]
+          requires: []
           step: vpc_crud
-          operations: ["delete_vpc"]
+          description: "Check a VPC can be deleted"
+          compose:
+            - VpcCrudCheck:
+                operations: ["delete_vpc"]
         # no test id for subnet count / multi-AZ layout (SDN04-01 covers exclusive-subnet isolation, not subnet topology).
         SubnetConfigCheck:
           test_id: "N/A"
           labels: ["network"]
+          requires: []
           step: subnet_config
           min_subnets: 4
           require_multi_az: true
@@ -91,48 +155,70 @@ tests:
           # SDN04-03 (E/W isolation) is exercised by the same check but is not separately attributable under a single test_id.
           test_id: "SDN04-02"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: vpc_isolation
-        SgCrudCheck-create:
+        SecurityGroupCreatedCheck:
           test_id: "SDN02-01"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_crud
-          operations: ["create_vpc", "create_sg"]
-        SgCrudCheck-read:
+          description: "Check a security group can be created"
+          compose:
+            - SgCrudCheck:
+                operations: ["create_vpc", "create_sg"]
+        SecurityGroupReadCheck:
           test_id: "SDN02-02"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_crud
-          operations: ["read_sg"]
-        SgCrudCheck-update:
+          description: "Check a security group can be retrieved after it is created"
+          compose:
+            - SgCrudCheck:
+                operations: ["read_sg"]
+        SecurityGroupUpdatedCheck:
           test_id: "SDN02-03"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_crud
-          operations: ["update_sg_add_rule", "update_sg_modify_rule", "update_sg_remove_rule"]
-        SgCrudCheck-delete:
+          description: "Check a security group's rules can be added, modified, and removed"
+          compose:
+            - SgCrudCheck:
+                operations: ["update_sg_add_rule", "update_sg_modify_rule", "update_sg_remove_rule"]
+        SecurityGroupDeletedCheck:
           test_id: "SDN02-04"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_crud
-          operations: ["delete_sg", "verify_deleted"]
+          description: "Check a security group can be deleted and stays deleted"
+          compose:
+            - SgCrudCheck:
+                operations: ["delete_sg", "verify_deleted"]
         # SG/NACL enforcement + connectivity/traffic behavior have no dedicated
         # plan item (SG CRUD is SDN02-01..04; VPC isolation is SDN04-02).
         SecurityBlockingCheck:
           test_id: "N/A"
           labels: ["network", "security"]
+          requires: []
           step: security_blocking
         NetworkConnectivityCheck:
           test_id: "N/A"
           labels: ["network"]
+          requires: [vm, bare_metal]
           step: connectivity_test
         TrafficFlowCheck:
           test_id: "N/A"
           labels: ["network"]
+          requires: [vm, bare_metal]
           step: traffic_validation
         VpcIpConfigCheck:
           test_id: "IPAM02-01"
           labels: ["network"]
+          requires: []
           step: vpc_ip_config
         DhcpIpManagementCheck:
           test_id: "IPAM01-01"
           labels: ["network", "ssh"]
+          requires: [vm, bare_metal]
           step: dhcp_ip_test
 
     sg_scoping:
@@ -140,22 +226,27 @@ tests:
         SgWorkloadScopingCheck:
           test_id: "SDN02-05"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_workload_scoping
         SgNodeScopingCheck:
           test_id: "SDN02-06"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_node_scoping
         SgSubnetScopingCheck:
           test_id: "SDN02-07"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_subnet_scoping
         SgServiceScopingCheck:
           test_id: "SDN02-09"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_service_scoping
         SgPortSecurityPolicyCheck:
           test_id: "SDN02-10"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_port_security_policy
 
     sdn_policy:
@@ -163,6 +254,7 @@ tests:
         SgPolicyPropagationTimingCheck:
           test_id: "SDN02-08"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sg_policy_propagation
           max_propagation_seconds: 10
 
@@ -171,14 +263,17 @@ tests:
         SdnHardwareFaultLoggingCheck:
           test_id: "SDN09-01"
           labels: ["min_req", "network"]
+          requires: []
           step: sdn_hardware_fault_logging
         SdnLatencyPerfLoggingCheck:
           test_id: "SDN09-02"
           labels: ["min_req", "network"]
+          requires: []
           step: sdn_latency_perf_logging
         SdnFilterAuditTrailCheck:
           test_id: "SDN09-03"
           labels: ["min_req", "network", "security"]
+          requires: []
           step: sdn_filter_audit_trail
 
     sdn:
@@ -186,31 +281,38 @@ tests:
         ByoipCheck:
           test_id: "NET03-01"
           labels: ["min_req", "network"]
+          requires: []
           step: byoip_test
         StablePrivateIpCheck:
           test_id: "SDN11-01"
           labels: ["min_req", "network"]
+          requires: [vm, bare_metal]
           step: stable_ip_test
         StableEgressIpCheck:
           test_id: "DMS05-01"
           labels: ["min_req", "network"]
+          requires: [vm, bare_metal]
           step: stable_egress_ip_test
         FloatingIpCheck:
           test_id: "SDN05-01"
           labels: ["min_req", "network"]
+          requires: [vm, bare_metal]
           step: floating_ip_test
           max_switch_seconds: 10
         LocalizedDnsCheck:
           test_id: "SDN06-01"
           labels: ["min_req", "network"]
+          requires: []
           step: dns_test
         VpcPeeringCheck:
           test_id: "SDN07-01"
           labels: ["min_req", "network"]
+          requires: []
           step: peering_test
         StorageL3RoutingCheck:
           test_id: "SDN08-01"
           labels: ["min_req", "network"]
+          requires: [vm, bare_metal]
           step: storage_l3_routing
 
     # Read-only metadata/API checks for provider-reported backend fabric
@@ -220,18 +322,24 @@ tests:
         BackendSwitchFabricCheck:
           test_id: "NET01-01"
           labels: ["min_req", "network"]
+          requires: [vm, bare_metal]
           step: backend_switch_fabric
         NvlinkDomainCheck:
           test_id: "NET02-02"
           labels: ["min_req", "network"]
+          requires: [vm, bare_metal]
           step: nvlink_domain
 
     teardown_checks:
       step: teardown
       checks:
-        StepSuccessCheck:
+        NetworkResourcesDeletedCheck:
           test_id: "N/A"
           labels: ["network"]
+          requires: []
+          description: "Check the network resources created for the run are deleted"
+          compose:
+            - StepSuccessCheck
 
   exclude:
     labels: []
