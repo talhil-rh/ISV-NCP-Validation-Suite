@@ -70,14 +70,14 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
-            # The agnhost image declares no USER, so it defaults to root. With
-            # runAsNonRoot but no runAsUser the kubelet refuses to start the
-            # container ("container has runAsNonRoot and image will run as
-            # root"), so the Deployment never becomes Available. Pin a non-root
-            # UID (as the sibling network_policy_test_pods.yaml already does)
-            # so the webhook server runs and passes its readiness probe.
-            runAsUser: 1000
+            # Do not set runAsUser — OCP assigns a UID from the namespace's
+            # allocated range (e.g. 1001130000+). A hardcoded UID like 1000
+            # is rejected by the restricted-v2 SCC on OCP clusters.
+            # The agnhost webhook subcommand runs fine as any non-root UID.
             readOnlyRootFilesystem: true
+            # Required by OCP 4.14+ PodSecurity "restricted" policy.
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop:
                 - ALL

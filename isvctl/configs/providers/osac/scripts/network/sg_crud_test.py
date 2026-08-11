@@ -122,7 +122,7 @@ def main() -> int:
             "spec.ingress",
             {
                 "spec": {
-                    "virtual_network": vnet_id,
+                    "virtual_network": {"id": vnet_id},
                     "ingress": [
                         {
                             "protocol": "PROTOCOL_TCP",
@@ -145,7 +145,7 @@ def main() -> int:
             "spec.ingress",
             {
                 "spec": {
-                    "virtual_network": vnet_id,
+                    "virtual_network": {"id": vnet_id},
                     "ingress": [
                         {
                             "protocol": "PROTOCOL_TCP",
@@ -166,7 +166,7 @@ def main() -> int:
         s, b = client.update_security_group(
             sg_id,
             "spec.ingress",
-            {"spec": {"virtual_network": vnet_id, "ingress": []}},
+            {"spec": {"virtual_network": {"id": vnet_id}, "ingress": []}},
         )
         if s == 200:
             result["tests"]["update_sg_remove_rule"] = {"passed": True}

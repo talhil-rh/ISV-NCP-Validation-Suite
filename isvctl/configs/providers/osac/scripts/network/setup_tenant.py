@@ -100,9 +100,19 @@ def main() -> int:
         )
         result["tenant_name"] = tenant_name
 
-        # osac-operator auto-provisions a matching K8s Tenant CRD + labeled
-        # namespace once the fulfillment Tenant syncs to the IDP.
+        # The osac-operator reconciles Tenant CRDs but does not auto-create them
+        # from fulfillment service events. Explicitly create the namespace and CRD
+        # so the operator can reconcile and set status.namespace.
+        kubectl = shutil.which("kubectl") or shutil.which("oc") or "kubectl"
+        subprocess.run(
+            [kubectl, "create", "namespace", tenant_name],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
         tc = TenantClient(config)
+        tc.create(tenant_name)
+
         deadline = time.time() + POLL_TIMEOUT
         namespace = ""
         while time.time() < deadline:

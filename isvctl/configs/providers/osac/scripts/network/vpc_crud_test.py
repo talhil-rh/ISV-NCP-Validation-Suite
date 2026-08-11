@@ -100,11 +100,11 @@ def main() -> int:
         else:
             result["tests"]["read_vpc"]["error"] = f"HTTP {status}: {body}"
 
-        # UPDATE (labels)
+        # UPDATE (labels) — metadata.name required by buf validation even on partial PATCH
         status, body = client.update_virtual_network(
             vnet_id,
             "metadata.labels",
-            {"metadata": {"labels": {"isv-test": "true"}}, "spec": {"ipv4_cidr": cidr}},
+            {"metadata": {"name": vnet_name, "labels": {"isv-test": "true"}}, "spec": {"ipv4_cidr": cidr}},
         )
         if status == 200:
             result["tests"]["update_tags"] = {"passed": True}

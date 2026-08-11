@@ -544,7 +544,8 @@ class FulfillmentClient:
             hdrs["Authorization"] = f"Bearer {token}"
         spec: dict[str, Any] = {"ipv4_cidr": ipv4_cidr}
         if network_class:
-            spec["network_class"] = network_class
+            # network_class is a nested message {id: <uuid>} in the current API
+            spec["network_class"] = {"id": network_class}
         payload = json.dumps({"metadata": {"name": name}, "spec": spec}).encode()
         return self._api_request(
             "/api/fulfillment/v1/virtual_networks",
@@ -646,7 +647,7 @@ class FulfillmentClient:
         payload = json.dumps(
             {
                 "metadata": {"name": name},
-                "spec": {"virtual_network": virtual_network, "ipv4_cidr": ipv4_cidr},
+                "spec": {"virtual_network": {"id": virtual_network}, "ipv4_cidr": ipv4_cidr},
             }
         ).encode()
         return self._api_request(
@@ -700,7 +701,7 @@ class FulfillmentClient:
         hdrs = dict(self._headers)
         if token:
             hdrs["Authorization"] = f"Bearer {token}"
-        spec: dict[str, Any] = {"virtual_network": virtual_network}
+        spec: dict[str, Any] = {"virtual_network": {"id": virtual_network}}
         if ingress is not None:
             spec["ingress"] = ingress
         if egress is not None:
@@ -879,7 +880,7 @@ class FulfillmentClient:
         payload = json.dumps(
             {
                 "metadata": {"name": name},
-                "spec": {"external_ip": eip_id, "compute_instance": compute_instance_id},
+                "spec": {"external_ip": {"id": eip_id}, "compute_instance": {"id": compute_instance_id}},
             }
         ).encode()
         return self._api_request("/api/fulfillment/v1/external_ip_attachments", method="POST", data=payload)
@@ -924,11 +925,11 @@ class FulfillmentClient:
         hdrs = dict(self._headers)
         if token:
             hdrs["Authorization"] = f"Bearer {token}"
-        spec: dict[str, Any] = {"template": template_id}
+        spec: dict[str, Any] = {"template": {"id": template_id}}
         if subnet_id:
-            spec["network_attachments"] = [{"subnet": subnet_id}]
+            spec["network_attachments"] = [{"subnet": {"id": subnet_id}}]
         if instance_type_name:
-            spec["instance_type"] = instance_type_name
+            spec["instance_type"] = {"id": instance_type_name}
         payload = json.dumps({"metadata": {"name": name}, "spec": spec}).encode()
         return self._api_request(
             "/api/fulfillment/v1/compute_instances",
@@ -992,9 +993,7 @@ class FulfillmentClient:
             path += f"?filter={urllib.parse.quote(filter_expr, safe='')}"
         return self._api_request(path)
 
-    def update_bare_metal_instance(
-        self, bmi_id: str, patch: dict[str, Any], update_mask: list[str]
-    ) -> tuple[int, Any]:
+    def update_bare_metal_instance(self, bmi_id: str, patch: dict[str, Any], update_mask: list[str]) -> tuple[int, Any]:
         """PATCH /api/fulfillment/v1/baremetal_instances/{id}."""
         encoded = urllib.parse.quote(bmi_id, safe="")
         mask = urllib.parse.quote(",".join(update_mask), safe="")
@@ -1009,6 +1008,28 @@ class FulfillmentClient:
         """DELETE /api/fulfillment/v1/baremetal_instances/{id}."""
         encoded = urllib.parse.quote(bmi_id, safe="")
         return self._api_request(f"/api/fulfillment/v1/baremetal_instances/{encoded}", method="DELETE")
+
+    def get_baremetal_catalog_item_id(self, name: str = "") -> str:
+        """Return the ID of the first published BareMetalInstanceCatalogItem.
+
+        If *name* is given, return the ID of the item with that metadata.name.
+        Raises RuntimeError if no catalog items are found.
+        """
+        status, body = self._api_request("/api/fulfillment/v1/baremetal_instance_catalog_items")
+        if status != 200:
+            raise RuntimeError(f"Failed to list BareMetalInstanceCatalogItems (HTTP {status}): {body}")
+        items = body.get("items", [])
+        if not items:
+            raise RuntimeError(
+                "No BareMetalInstanceCatalogItems found. "
+                "Run deploy-osac-env.sh to create one before running bare metal tests."
+            )
+        if name:
+            for item in items:
+                if item.get("metadata", {}).get("name") == name:
+                    return item["id"]
+            raise RuntimeError(f"BareMetalInstanceCatalogItem '{name}' not found")
+        return items[0]["id"]
 
     def wait_bare_metal_instance_state(
         self, bmi_id: str, target_state: str, timeout: int = 900, interval: int = 10
@@ -1449,6 +1470,7 @@ def create_sa_token(namespace: str, sa_name: str, duration: str = "3600s") -> tu
     iat = payload.get("iat", 0)
     ttl = exp - iat if exp and iat else int(duration.rstrip("s"))
     return token_str, ttl
+
 
 def get_cert_manager_certificates() -> list[dict[str, Any]]:
     """List cert-manager Certificate resources across all namespaces."""

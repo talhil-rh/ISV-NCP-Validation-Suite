@@ -126,7 +126,7 @@ def main() -> int:
             "spec.ingress",
             {
                 "spec": {
-                    "virtual_network": vnet_id,
+                    "virtual_network": {"id": vnet_id},
                     "ingress": [
                         {
                             "protocol": "PROTOCOL_TCP",
