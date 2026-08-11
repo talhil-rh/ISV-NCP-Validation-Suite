@@ -18,16 +18,20 @@
 # Imports validations from the provider-agnostic bare_metal canonical suite.
 # Exercises the public BareMetalInstances REST API to validate the full
 # instance lifecycle: launch → describe → list → tag → stop → start →
-# reboot → power-cycle → teardown → verify.
+# reboot → power-cycle → reinstall → teardown → verify.
 #
 # Implemented test IDs (in this file):
+#   BOOT01-03: image installed (BmHostRunsExpectedImageCheck)
+#   CNP01-04: topology placement (BmTopologyPlacementCheck)
 #   CNP01-05: reboot (InstanceRebootCheck)
 #   CNP01-06: power-cycle (InstancePowerCycleCheck)
 #   CNP01-07: stop (InstanceStopCheck)
 #   CNP01-08: start (InstanceStartCheck)
 #   CNP05-01: instance tags (InstanceTagCheck)
 #   CNP08-01: stable identifier (StableIdentifierCheck)
+#   CNP08-02: stable BMH identifier across reinstall (BmIdentifierStableAfterReinstallCheck)
 #   SEC21-01: sanitization confirmed (StepSuccessCheck on verify_teardown)
+#   SEC21-02: disk sanitization (BmDiskSanitizationCheck)
 #
 # SSH-labeled and GPU-labeled checks are excluded because they require
 # direct OS-level SSH access that is not wired in this baseline config.
@@ -47,8 +51,7 @@
 #   OSAC_ADMIN_CLIENT_ID, OSAC_ADMIN_CLIENT_SECRET  (emergency service account)
 #   OSAC_FULFILLMENT_URL                             (REST gateway)
 #   OSAC_FULFILLMENT_GRPC_ADDRESS                    (for tenant registration)
-#   OSAC_CATALOG_ITEM                                (bare metal catalog item name)
-#   Optional: OSAC_VERIFY_SSL (default "true"), OSAC_TENANT_NAMESPACE (default "osac-e2e-ci")
+#   Optional: OSAC_CATALOG_ITEM (auto-discovered if unset), OSAC_VERIFY_SSL, OSAC_TENANT_NAMESPACE
 #
 # See osac-platform-context.md for environment variable discovery commands.
 
@@ -79,8 +82,6 @@ commands:
         phase: setup
         command: "python3 ../scripts/bare_metal/launch_instance.py"
         args:
-          - "--catalog-item"
-          - "{{catalog_item}}"
           - "--tenant-namespace"
           - "{{steps.setup_tenant.tenant_namespace}}"
           - "--region"
@@ -129,6 +130,45 @@ commands:
           - "--tenant-namespace"
           - "{{steps.setup_tenant.tenant_namespace}}"
         timeout: 60
+
+      # =======================================================================
+      # TEST: Topology placement (CNP01-04)
+      # =======================================================================
+      - name: topology_placement
+        phase: test
+        command: "python3 ../scripts/bare_metal/topology_placement.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 30
+
+      # =======================================================================
+      # TEST: Verify image installed (BOOT01-03)
+      # =======================================================================
+      - name: verify_image
+        phase: test
+        command: "python3 ../scripts/bare_metal/verify_image.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 30
+
+      # =======================================================================
+      # TEST: Query disk sanitization (SEC21-02)
+      # =======================================================================
+      - name: query_sanitization
+        phase: test
+        command: "python3 ../scripts/bare_metal/query_sanitization.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 30
 
       # =======================================================================
       # TEST: Stop instance (CNP01-07)
@@ -195,6 +235,23 @@ commands:
         timeout: 1800
 
       # =======================================================================
+      # TEST: Reinstall instance (CNP08-02)
+      # =======================================================================
+      - name: reinstall_instance
+        phase: test
+        command: "python3 ../scripts/bare_metal/reinstall_instance.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+          - "--external-ip"
+          - "{{steps.launch_instance.external_ip}}"
+        timeout: 2400
+
+      # =======================================================================
       # TEARDOWN: Delete instance and ephemeral tenant
       # =======================================================================
       - name: teardown
@@ -202,12 +259,12 @@ commands:
         command: "python3 ../scripts/bare_metal/teardown.py"
         args:
           - "--instance-id"
-          - "{{steps.launch_instance.instance_id}}"
+          - "{{steps.reinstall_instance.new_instance_id | default(steps.launch_instance.instance_id)}}"
           - "--tenant-name"
           - "{{steps.setup_tenant.tenant_name}}"
           - "--tenant-namespace"
           - "{{steps.setup_tenant.tenant_namespace}}"
-        timeout: 300
+        timeout: 600
         output_schema: teardown
 
       # =======================================================================
@@ -218,7 +275,7 @@ commands:
         command: "python3 ../scripts/bare_metal/verify_teardown.py"
         args:
           - "--instance-id"
-          - "{{steps.launch_instance.instance_id}}"
+          - "{{steps.reinstall_instance.new_instance_id | default(steps.launch_instance.instance_id)}}"
           - "--tenant-namespace"
           - "{{steps.setup_tenant.tenant_namespace}}"
         timeout: 120
@@ -229,12 +286,28 @@ tests:
 
   settings:
     region: "osac-default"
-    catalog_item: "{{env.OSAC_CATALOG_ITEM | default('demo-catalog-item', true)}}"
 
   # Exclude labels for checks that require direct OS-level SSH, GPU drivers,
   # long-running workloads, or platform capabilities not wired in this config.
   # The power-lifecycle checks (stop/start/reboot/power_cycle) are kept because
   # those scripts perform their own SSH probes with the generated key.
+  # OSAC labels must be lowercase (Kubernetes constraint) — override the suite's
+  # default required_keys which use title-case (Name, CreatedBy) for AWS-style providers.
+  validations:
+    tag_checks:
+      checks:
+        BmHostTaggedCheck:
+          required_keys: ["name", "created-by"]
+
+    # Override the reinstall stable-identifier reference to use the BMH name
+    # (steps.launch_instance.bmh_id) rather than the BMI UUID
+    # (steps.launch_instance.instance_id). The BMI UUID changes with each
+    # reinstall; the BMH name is the stable physical identity of the host.
+    reinstall_state:
+      checks:
+        BmIdentifierStableAfterReinstallCheck:
+          reference_id: "{{steps.launch_instance.bmh_id}}"
+
   exclude:
     labels:
       - "ssh"
@@ -246,18 +319,10 @@ tests:
       - "governance"
       - "health"
       - "infiniband"
-      - "sanitization"
       - "breakfix"
       - "sds_controller"
       - "attestation"
       - "firmware"
-      - "disk"
       - "iam"
       - "vm"
       - "network"
-
-  validations:
-    tag_checks:
-      checks:
-        InstanceTagCheck:
-          required_keys: ["name", "created-by"]

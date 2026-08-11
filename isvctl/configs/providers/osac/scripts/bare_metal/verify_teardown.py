@@ -31,7 +31,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.osac_client import FulfillmentClient, create_sa_token, get_admin_token, get_env_config
+from common.osac_client import FulfillmentClient, get_admin_token, get_env_config
 
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 

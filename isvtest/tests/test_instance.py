@@ -21,8 +21,10 @@ from typing import Any
 
 import pytest
 
+from isvtest.core.composite import CompositeCheck
 from isvtest.validations.instance import (
     SERIAL_CONSOLE_RETENTION_DAYS_REQUIRED,
+    BmTopologyPlacementCheck,
     InstanceListCheck,
     InstancePowerCycleCheck,
     InstanceRebootCheck,
@@ -750,3 +752,174 @@ class TestStableIdentifierCheck:
         assert result["passed"] is False
         assert "bmi-999" in result["error"]
         assert "bmi-001" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# OSAC bare metal provider checks (CNP01-04 and BOOT01-03)
+# ---------------------------------------------------------------------------
+
+# Composite wiring for BmHostRunsExpectedImageCheck (BOOT01-03).
+# Mirrors the suite YAML compose list so tests exercise the real runtime path.
+_VERIFY_IMAGE_COMPOSE: list[Any] = [
+    "StepSuccessCheck",
+    {"FieldExistsCheck": {"fields": ["instance_id", "image_id", "image_name", "instance_state"]}},
+    {"InstanceStateCheck": {"expected_state": "running"}},
+]
+
+
+def _verify_image_output(**overrides: Any) -> dict[str, Any]:
+    """Build a minimal passing verify_image step_output; overrides replace keys."""
+    base: dict[str, Any] = {
+        "success": True,
+        "instance_id": "bmi-abc123",
+        "image_id": "http://ironic.example/images/fedora-44.qcow2",
+        "image_name": "fedora-44",
+        "instance_state": "running",
+        "state": "running",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestBmTopologyPlacementCheck:
+    """Tests for BmTopologyPlacementCheck (topology_placement step, CNP01-04)."""
+
+    def test_passes_with_placement_supported_and_az(self) -> None:
+        """Happy path: placement_supported=True, AZ non-empty, no failed operations."""
+        v = BmTopologyPlacementCheck(
+            config={
+                "step_output": {
+                    "instance_id": "bmi-abc123",
+                    "placement_supported": True,
+                    "availability_zone": "rack-1",
+                    "placement_strategy": "host-type-aware",
+                    "operations": {},
+                }
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is True
+        assert "AZ=rack-1" in result["output"]
+        assert "host-type-aware" in result["output"]
+
+    def test_fails_when_placement_not_supported(self) -> None:
+        """placement_supported=False must fail the check."""
+        v = BmTopologyPlacementCheck(
+            config={
+                "step_output": {
+                    "instance_id": "bmi-abc123",
+                    "placement_supported": False,
+                    "availability_zone": "",
+                    "placement_strategy": "",
+                    "operations": {},
+                }
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "placement" in result["error"].lower()
+
+    def test_fails_when_instance_id_missing(self) -> None:
+        """No instance_id in step output fails immediately."""
+        v = BmTopologyPlacementCheck(
+            config={
+                "step_output": {
+                    "placement_supported": True,
+                    "availability_zone": "rack-1",
+                    "operations": {},
+                }
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "instance_id" in result["error"]
+
+
+class TestBmIdentifierStableAfterReinstallCheck:
+    """Tests for BmIdentifierStableAfterReinstallCheck (reinstall_instance step, CNP08-02).
+
+    BmIdentifierStableAfterReinstallCheck is a StableIdentifierCheck composite.
+    Unlike reboot/start/power-cycle checks that compare BMI UUIDs, the reinstall
+    check compares BMH names: instance_id emitted by reinstall_instance.py is the
+    BMH name (stable physical identity), and reference_id is steps.launch_instance.bmh_id
+    (also a BMH name). The BMI UUID changes on every reinstall; the BMH does not.
+    """
+
+    _BMH = "host-inventory/virtual-bmh-caas-1"
+    _BMH_OTHER = "host-inventory/virtual-bmh-caas-2"
+
+    def test_passes_when_bmh_name_matches_reference(self) -> None:
+        """Happy path: instance_id (BMH name) equals reference_id (launch bmh_id)."""
+        v = StableIdentifierCheck(
+            config={
+                "step_output": {"instance_id": self._BMH},
+                "reference_id": self._BMH,
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is True
+        assert "stable" in result["output"].lower()
+
+    def test_fails_when_bmh_name_differs_from_reference(self) -> None:
+        """Different BMH name means a different physical host was allocated — fail."""
+        v = StableIdentifierCheck(
+            config={
+                "step_output": {"instance_id": self._BMH_OTHER},
+                "reference_id": self._BMH,
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "virtual-bmh-caas-2" in result["error"]
+        assert "virtual-bmh-caas-1" in result["error"]
+
+
+class TestBmHostRunsExpectedImageCheck:
+    """Tests for BmHostRunsExpectedImageCheck (verify_image step, BOOT01-03).
+
+    BmHostRunsExpectedImageCheck is a composite defined in bare_metal.yaml:
+      compose:
+        - StepSuccessCheck
+        - FieldExistsCheck: {fields: [instance_id, image_id, image_name, instance_state]}
+        - InstanceStateCheck: {expected_state: running}
+
+    Tests instantiate CompositeCheck with the same compose list to exercise
+    the real runtime path without depending on the suite YAML loader.
+    """
+
+    def test_passes_with_all_required_fields_and_running_state(self) -> None:
+        """Happy path: all required fields present, success=True, state=running."""
+        v = CompositeCheck(
+            config={
+                "step_output": _verify_image_output(),
+                "compose": _VERIFY_IMAGE_COMPOSE,
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is True
+
+    def test_fails_when_image_id_missing(self) -> None:
+        """FieldExistsCheck fails when image_id is absent from step output."""
+        out = _verify_image_output()
+        del out["image_id"]
+        v = CompositeCheck(
+            config={
+                "step_output": out,
+                "compose": _VERIFY_IMAGE_COMPOSE,
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "image_id" in result["error"]
+
+    def test_fails_when_instance_state_not_running(self) -> None:
+        """InstanceStateCheck fails when state is not 'running'."""
+        v = CompositeCheck(
+            config={
+                "step_output": _verify_image_output(instance_state="stopped", state="stopped"),
+                "compose": _VERIFY_IMAGE_COMPOSE,
+            }
+        )
+        result = v.execute()
+        assert result["passed"] is False
+        assert "stopped" in result["error"]

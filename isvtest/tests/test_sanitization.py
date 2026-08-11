@@ -338,3 +338,89 @@ class TestSkipSanitizationBreakfixCheck:
         assert check._passed is False
         sub = next(r for r in check._subtest_results if r["name"] == "breakfix_skip_m-001")
         assert "tenancy was not preserved" in sub["message"]
+
+
+# ===========================================================================
+# TestBmDiskSanitizationCheck — OSAC provider scenario (SEC21-02)
+# ===========================================================================
+
+# OSAC-specific lifecycle tokens: Ironic image-write cycle wipes the disk.
+_OSAC_TRANSITIONS = ["in_use", "deprovisioning", "provisioning", "provisioned"]
+
+
+def _osac_machine(
+    *,
+    machine_id: str = "host-inventory/virtual-bmh-caas-1",
+    served_tenant: bool = True,
+    stale_tenant_binding: bool = False,
+    sanitized: bool = True,
+    has_gpu: bool = False,
+    status: str = "provisioned",
+    transitions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build an OSAC-specific per-machine sanitization record (query_sanitization.py output)."""
+    return {
+        "machine_id": machine_id,
+        "served_tenant": served_tenant,
+        "stale_tenant_binding": stale_tenant_binding,
+        "sanitized": sanitized,
+        "transitions": transitions if transitions is not None else _OSAC_TRANSITIONS,
+        "has_gpu": has_gpu,
+        "status": status,
+    }
+
+
+def _osac_output(
+    *,
+    success: bool = True,
+    machines: list[dict[str, Any]] | None = None,
+    error: str = "",
+) -> dict[str, Any]:
+    """Build a query_sanitization step output in the OSAC shape."""
+    if machines is None:
+        machines = [_osac_machine()]
+    out: dict[str, Any] = {
+        "success": success,
+        "platform": "bare_metal",
+        "test_name": "query_sanitization",
+        "machines": machines,
+    }
+    if error:
+        out["error"] = error
+    return out
+
+
+class TestBmDiskSanitizationCheck:
+    """OSAC-specific tests for BmDiskSanitizationCheck (SEC21-02).
+
+    Exercises the check with the output shape produced by
+    query_sanitization.py on OSAC: sanitized=True maps to Ironic having
+    written a fresh OS image (provisioned state), which wipes the disk.
+    """
+
+    def test_osac_provisioned_bmh_passes(self) -> None:
+        """A BMH in provisioned state (Ironic re-imaged the disk) passes."""
+        check = BmDiskSanitizationCheck(config={"step_output": _osac_output()})
+        check.run()
+        assert check._passed is True, check._error
+        sub = next(r for r in check._subtest_results if r["name"] == "disk_host-inventory/virtual-bmh-caas-1")
+        assert sub["passed"] is True
+
+    def test_unsanitized_bmh_fails(self) -> None:
+        """A BMH that did not go through Ironic image-write (sanitized=False) fails."""
+        machine = _osac_machine(sanitized=False, status="available")
+        check = BmDiskSanitizationCheck(config={"step_output": _osac_output(machines=[machine])})
+        check.run()
+        assert check._passed is False
+        assert "1/1 machine(s)" in check._error
+        sub = next(r for r in check._subtest_results if "disk_" in r["name"])
+        assert "without sanitization" in sub["message"]
+
+    def test_stale_tenant_binding_fails(self) -> None:
+        """A BMH still bound to a prior tenant while offered to a new one fails."""
+        machine = _osac_machine(stale_tenant_binding=True)
+        check = BmDiskSanitizationCheck(config={"step_output": _osac_output(machines=[machine])})
+        check.run()
+        assert check._passed is False
+        sub = next(r for r in check._subtest_results if "disk_" in r["name"])
+        assert "still bound to a prior tenant" in sub["message"]

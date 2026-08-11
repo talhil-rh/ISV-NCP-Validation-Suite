@@ -90,7 +90,8 @@ def main() -> int:
             raw_state = item.get("status", {}).get("state", "")
             # Use the first network attachment's subnet as a rough vpc_id equivalent
             attachments = item.get("spec", {}).get("network_attachments", [])
-            vpc_id = attachments[0].get("subnet", "none") if attachments else "none"
+            subnet = attachments[0].get("subnet", "none") if attachments else "none"
+            vpc_id = subnet.get("id", "none") if isinstance(subnet, dict) else subnet
             instances.append(
                 {
                     "instance_id": bmi_id,

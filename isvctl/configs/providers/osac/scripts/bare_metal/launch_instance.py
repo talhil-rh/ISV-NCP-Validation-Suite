@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,37 @@ from common.osac_client import FulfillmentClient, create_sa_token, get_env_confi
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 RUN_STRATEGY_ALWAYS = "BARE_METAL_INSTANCE_RUN_STRATEGY_ALWAYS"
 POLL_TIMEOUT = 1800
+
+
+def _get_external_host_id(bmi_id: str, operator_ns: str) -> str:
+    """Return the BareMetalHost externalHostID for a BareMetalInstance, or empty string.
+
+    The BMI CRD stores the assigned BMH as ``spec.externalHostID`` in the form
+    ``<namespace>/<bmh-name>`` (e.g. ``host-inventory/virtual-bmh-caas-1``).
+    Returns empty string on any failure so callers can treat it as non-fatal.
+    """
+    try:
+        kubectl = shutil.which("kubectl") or shutil.which("oc")
+        if not kubectl:
+            return ""
+        label = f"osac.openshift.io/baremetalinstance-uuid={bmi_id}"
+        r = subprocess.run(
+            [
+                kubectl,
+                "get",
+                "baremetalinstance",
+                "-n",
+                operator_ns,
+                f"-l={label}",
+                "-o=jsonpath={.items[0].spec.externalHostID}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
 
 
 def generate_ssh_key(key_dir: str) -> tuple[str, str]:
@@ -86,15 +118,26 @@ def get_bmh_ip(bmi_id: str, operator_namespace: str = "osac-e2e-ci") -> str | No
     """
     try:
         import shutil
+
         kubectl = shutil.which("kubectl") or shutil.which("oc")
         if not kubectl:
             return None
 
         crd_name = f"bmi-{bmi_id}"
         r = subprocess.run(
-            [kubectl, "get", "baremetalinstance", crd_name, "-n", operator_namespace,
-             "-o", "jsonpath={.spec.externalHostID}"],
-            capture_output=True, text=True, timeout=15,
+            [
+                kubectl,
+                "get",
+                "baremetalinstance",
+                crd_name,
+                "-n",
+                operator_namespace,
+                "-o",
+                "jsonpath={.spec.externalHostID}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if r.returncode != 0 or not r.stdout.strip():
             return None
@@ -106,9 +149,19 @@ def get_bmh_ip(bmi_id: str, operator_namespace: str = "osac-e2e-ci") -> str | No
         bmh_namespace, bmh_name = parts
 
         r2 = subprocess.run(
-            [kubectl, "get", "baremetalhost", bmh_name, "-n", bmh_namespace,
-             "-o", "jsonpath={.status.hardware.nics[0].ip}"],
-            capture_output=True, text=True, timeout=15,
+            [
+                kubectl,
+                "get",
+                "baremetalhost",
+                bmh_name,
+                "-n",
+                bmh_namespace,
+                "-o",
+                "jsonpath={.status.hardware.nics[0].ip}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         ip = r2.stdout.strip()
         return ip if ip else None
@@ -118,7 +171,8 @@ def get_bmh_ip(bmi_id: str, operator_namespace: str = "osac-e2e-ci") -> str | No
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Launch BareMetalInstance (OSAC)")
-    parser.add_argument("--catalog-item", default="", help="Bare metal catalog item name")
+    # --catalog-item removed: ID is auto-discovered via the fulfillment API,
+    # or overridden with OSAC_CATALOG_ITEM env var.
     parser.add_argument("--tenant-namespace", default="", help="K8s namespace for SA token")
     parser.add_argument("--subnet", default="", help="Optional Subnet ID for network attachment")
     parser.add_argument("--region", default="")
@@ -130,12 +184,14 @@ def main() -> int:
         "test_name": "launch_instance",
         "instance_id": "",
         "state": "",
-        "instance_type": args.catalog_item,
+        "instance_type": os.environ.get("OSAC_CATALOG_ITEM", ""),
         "external_ip": "",
         "key_file": "",
         # public_ip / private_ip must be strings (not null) per the "instance" output schema
         "public_ip": "",
         "private_ip": "",
+        # Stable identifier across reinstall: the BMH name assigned to this instance
+        "bmh_id": "",
     }
 
     if DEMO_MODE:
@@ -148,15 +204,13 @@ def main() -> int:
                 "key_file": "/tmp/demo-bmi.pem",
                 "public_ip": "192.0.2.1",
                 "private_ip": "",
+                "bmh_id": "host-inventory/virtual-bmh-caas-demo",
             }
         )
         print(json.dumps(result, indent=2))
         return 0
 
-    if not args.catalog_item:
-        result["error"] = "--catalog-item is required (set OSAC_CATALOG_ITEM)"
-        print(json.dumps(result, indent=2))
-        return 1
+    # catalog_item is resolved at runtime if not explicitly provided
     if not args.tenant_namespace:
         result["error"] = "--tenant-namespace is required"
         print(json.dumps(result, indent=2))
@@ -169,6 +223,10 @@ def main() -> int:
         config = get_env_config(require_admin=False)
         token, _ttl = create_sa_token(args.tenant_namespace, "default")
         client = FulfillmentClient(config, token)
+
+        # Resolve catalog item: use explicit arg/env value, else discover from API
+        catalog_item_id = os.environ.get("OSAC_CATALOG_ITEM", "") or client.get_baremetal_catalog_item_id()
+        result["instance_type"] = catalog_item_id
 
         # Generate SSH key pair for this run
         key_file, pub_key = generate_ssh_key(key_dir)
@@ -183,14 +241,14 @@ def main() -> int:
                 "labels": {"name": "osac-bm-validation", "created-by": "isv-validation"},
             },
             "spec": {
-                "catalog_item": args.catalog_item,
+                "catalog_item": {"id": catalog_item_id},
                 "ssh_public_key": pub_key,
                 "auto_external_ip_attachment": True,
                 "run_strategy": RUN_STRATEGY_ALWAYS,
             },
         }
         if args.subnet:
-            body["spec"]["network_attachments"] = [{"subnet": args.subnet}]
+            body["spec"]["network_attachments"] = [{"subnet": {"id": args.subnet}}]
 
         status, resp = client.create_bare_metal_instance(body)
         if status not in (200, 201):
@@ -211,6 +269,12 @@ def main() -> int:
         result["external_ip"] = external_ip
         result["public_ip"] = external_ip
         result["success"] = True
+
+        # Look up the assigned BMH name — stable identifier for reinstall checks.
+        # Non-fatal: leave bmh_id as "" if oc is not available or the CRD is not
+        # yet visible (the externalHostID is set during inventory allocation which
+        # completes before RUNNING, but oc may not be on PATH in all environments).
+        result["bmh_id"] = _get_external_host_id(bmi_id, config.tenant_namespace)
 
     except Exception as exc:
         result["error"] = str(exc)
