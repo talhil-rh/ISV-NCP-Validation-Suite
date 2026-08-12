@@ -33,10 +33,11 @@
 #   SEC21-01: sanitization confirmed (StepSuccessCheck on verify_teardown)
 #   SEC21-02: disk sanitization (BmDiskSanitizationCheck)
 #
-# SSH-labeled and GPU-labeled checks are excluded because they require
-# direct OS-level SSH access that is not wired in this baseline config.
-# The power-lifecycle scripts (stop/start/reboot/power_cycle) do perform
-# their own SSH probes using the key generated at launch time.
+# GPU-labeled checks are excluded (require direct GPU driver access).
+# SSH-labeled lifecycle checks (BmHostReadyCheck, BmHostReadyAfterStartCheck,
+# BmHostReadyAfterRebootCheck, BmHostReadyAfterPowerCycleCheck,
+# BmHostReadyAfterReinstallCheck) are enabled — each script emits public_ip
+# and key_file for paramiko; run from a host with direct BMH network access.
 #
 # Auth pattern: SA-token (create_sa_token) via the ephemeral tenant
 # namespace provisioned by setup_tenant.py from the network domain.
@@ -287,10 +288,6 @@ tests:
   settings:
     region: "osac-default"
 
-  # Exclude labels for checks that require direct OS-level SSH, GPU drivers,
-  # long-running workloads, or platform capabilities not wired in this config.
-  # The power-lifecycle checks (stop/start/reboot/power_cycle) are kept because
-  # those scripts perform their own SSH probes with the generated key.
   # OSAC labels must be lowercase (Kubernetes constraint) — override the suite's
   # default required_keys which use title-case (Name, CreatedBy) for AWS-style providers.
   validations:
@@ -308,10 +305,86 @@ tests:
         BmIdentifierStableAfterReinstallCheck:
           reference_id: "{{steps.launch_instance.bmh_id}}"
 
+    # Override SSH checks to use fedora user and expected OS.
+    # launch_instance and describe_instance already emit public_ip and key_file;
+    # start_ssh and reboot_ssh pull host/key_file from describe_instance via
+    # the suite's Jinja2 references.
+    # power_cycle_ssh wires host/key_file from describe_instance explicitly
+    # (IP is stable via ExternalIP attachment; key does not change).
+    # reinstall_ssh reads public_ip and key_file from reinstall_instance output
+    # (key may differ if a fresh key was generated during reinstall).
+    cloud_init:
+      checks:
+        BmCloudInitCheck:
+          user: "fedora"
+          metadata_url: "" # no cloud metadata service on OSAC bare metal
+
+    host_os:
+      checks:
+        BmVcpuPinningCheck:
+          user: "fedora"
+        BmHostSoftwareCheck:
+          user: "fedora"
+
+    cpu_info:
+      checks:
+        BmCpuInfoCheck:
+          user: "fedora"
+
+    ssh:
+      checks:
+        BmHostReadyCheck:
+          user: "fedora"
+          compose:
+            - ConnectivityCheck
+            - OsCheck:
+                expected_os: "fedora"
+
+    start_ssh:
+      checks:
+        BmHostReadyAfterStartCheck:
+          user: "fedora"
+          compose:
+            - ConnectivityCheck
+            - OsCheck:
+                expected_os: "fedora"
+
+    reboot_ssh:
+      checks:
+        BmHostReadyAfterRebootCheck:
+          user: "fedora"
+          compose:
+            - ConnectivityCheck
+            - OsCheck:
+                expected_os: "fedora"
+
+    power_cycle_ssh:
+      checks:
+        BmHostReadyAfterPowerCycleCheck:
+          host: "{{steps.describe_instance.public_ip}}"
+          key_file: "{{steps.describe_instance.key_file}}"
+          user: "fedora"
+          compose:
+            - ConnectivityCheck
+            - OsCheck:
+                expected_os: "fedora"
+
+    reinstall_ssh:
+      checks:
+        BmHostReadyAfterReinstallCheck:
+          user: "fedora"
+          compose:
+            - ConnectivityCheck
+            - OsCheck:
+                expected_os: "fedora"
+
   exclude:
     labels:
-      - "ssh"
       - "gpu"
+    tests:
+      # Virtual BMHs have no NVIDIA GPU — these checks hardcode nvidia-smi/lspci probes
+      - "BmHostSoftwareCheck"
+      - "BmCpuInfoCheck"
       - "workload"
       - "slow"
       - "ingestion"

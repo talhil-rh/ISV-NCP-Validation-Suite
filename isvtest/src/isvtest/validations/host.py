@@ -2018,7 +2018,10 @@ class CloudInitCheck(BaseValidation):
         host = ssh_cfg["ssh_host"]
         user = ssh_cfg["ssh_user"]
         key_path = ssh_cfg["ssh_key_path"]
-        metadata_url = str(self.config.get("metadata_url", "http://169.254.169.254/latest/meta-data/"))
+        metadata_url = self.config.get("metadata_url", "http://169.254.169.254/latest/meta-data/")
+        if metadata_url is None:
+            metadata_url = ""
+        metadata_url = str(metadata_url)
         metadata_headers: dict[str, str] = self.config.get("metadata_headers", {})
 
         if not host or not key_path:
@@ -2036,17 +2039,20 @@ class CloudInitCheck(BaseValidation):
                 done = "done" in stdout.lower()
                 self.report_subtest("cloud_init", done, stdout.strip())
 
-            # Check metadata service reachability
-            header_flags = " ".join(f"-H {shlex.quote(f'{k}: {v}')}" for k, v in metadata_headers.items())
-            curl_cmd = f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 {header_flags} -- {shlex.quote(metadata_url)}".strip()
-            exit_code, stdout, _ = run_ssh_command(ssh, curl_cmd)
-            http_code = stdout.strip()
-            metadata_ok = exit_code == 0 and http_code in ("200", "301")
-            self.report_subtest(
-                "metadata_service",
-                metadata_ok,
-                f"HTTP {http_code}" if http_code else "unreachable",
-            )
+            # Check metadata service reachability (skip when metadata_url is empty)
+            if not metadata_url:
+                self.report_subtest("metadata_service", True, "skipped (no metadata_url configured)")
+            else:
+                header_flags = " ".join(f"-H {shlex.quote(f'{k}: {v}')}" for k, v in metadata_headers.items())
+                curl_cmd = f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 {header_flags} -- {shlex.quote(metadata_url)}".strip()
+                exit_code, stdout, _ = run_ssh_command(ssh, curl_cmd)
+                http_code = stdout.strip()
+                metadata_ok = exit_code == 0 and http_code in ("200", "301")
+                self.report_subtest(
+                    "metadata_service",
+                    metadata_ok,
+                    f"HTTP {http_code}" if http_code else "unreachable",
+                )
 
             ssh.close()
 

@@ -84,27 +84,44 @@ def _get_external_host_id(bmi_id: str, operator_ns: str) -> str:
             return ""
         label = f"osac.openshift.io/baremetalinstance-uuid={bmi_id}"
         r = subprocess.run(
-            [kubectl, "get", "baremetalinstance", "-n", operator_ns, f"-l={label}",
-             "-o=jsonpath={.items[0].spec.externalHostID}"],
-            capture_output=True, text=True, timeout=15,
+            [
+                kubectl,
+                "get",
+                "baremetalinstance",
+                "-n",
+                operator_ns,
+                f"-l={label}",
+                "-o=jsonpath={.items[0].spec.externalHostID}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
         return ""
 
 
-def _get_other_bmhs_with_label(label_key: str, label_value: str,
-                               exclude_ns: str, exclude_name: str) -> list[tuple[str, str]]:
+def _get_other_bmhs_with_label(
+    label_key: str, label_value: str, exclude_ns: str, exclude_name: str
+) -> list[tuple[str, str]]:
     """Return (namespace, name) pairs of BMHs that have the given label, excluding one BMH."""
     kubectl = _kubectl_cmd()
     if not kubectl:
         return []
     try:
         r = subprocess.run(
-            [kubectl, "get", "baremetalhost", "-A",
-             f"-l={label_key}={label_value}",
-             "-o=jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{'\\n'}{end}"],
-            capture_output=True, text=True, timeout=15,
+            [
+                kubectl,
+                "get",
+                "baremetalhost",
+                "-A",
+                f"-l={label_key}={label_value}",
+                "-o=jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{'\\n'}{end}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         result = []
         for line in r.stdout.strip().splitlines():
@@ -130,9 +147,10 @@ def _patch_bmh_label(bmh_ns: str, bmh_name: str, label_key: str, label_value: st
         else:
             patch = json.dumps({"metadata": {"labels": {label_key: label_value}}})
         r = subprocess.run(
-            [kubectl, "patch", "baremetalhost", bmh_name, "-n", bmh_ns,
-             "--type=merge", f"--patch={patch}"],
-            capture_output=True, text=True, timeout=15,
+            [kubectl, "patch", "baremetalhost", bmh_name, "-n", bmh_ns, "--type=merge", f"--patch={patch}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         return r.returncode == 0
     except Exception:
@@ -159,9 +177,19 @@ def _poll_bmh_available(bmh_name: str, bmh_ns: str, timeout: int) -> bool:
     while time.time() < deadline:
         try:
             r = subprocess.run(
-                [kubectl, "get", "baremetalhost", bmh_name, "-n", bmh_ns,
-                 "-o", "jsonpath={.status.provisioning.state}"],
-                capture_output=True, text=True, timeout=15,
+                [
+                    kubectl,
+                    "get",
+                    "baremetalhost",
+                    bmh_name,
+                    "-n",
+                    bmh_ns,
+                    "-o",
+                    "jsonpath={.status.provisioning.state}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
             if r.returncode == 0 and r.stdout.strip() == "available":
                 return True
@@ -212,10 +240,14 @@ def ssh_probe(key_file: str, external_ip: str) -> tuple[bool, str]:
             proc = subprocess.run(
                 [
                     "ssh",
-                    "-i", key_file,
-                    "-o", "StrictHostKeyChecking=no",
-                    "-o", "ConnectTimeout=10",
-                    "-o", "BatchMode=yes",
+                    "-i",
+                    key_file,
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "ConnectTimeout=10",
+                    "-o",
+                    "BatchMode=yes",
                     f"fedora@{external_ip}",
                     "echo ok",
                 ],
@@ -249,7 +281,7 @@ def main() -> int:
         "success": False,
         "platform": "bare_metal",
         "test_name": "reinstall_instance",
-        "instance_id": "",       # BMH name — stable identifier (not BMI UUID)
+        "instance_id": "",  # BMH name — stable identifier (not BMI UUID)
         "state": "",
         "instance_state": "",
         "same_host": False,
@@ -258,6 +290,8 @@ def main() -> int:
         "new_instance_id": "",
         "ssh_ok": False,
         "external_ip": "",
+        "public_ip": "",  # alias for ConnectivityCheck/OsCheck step_output resolution
+        "key_file": args.key_file or "",  # updated to effective_key_file if a new key is generated
     }
 
     if DEMO_MODE:
@@ -273,6 +307,8 @@ def main() -> int:
                 "new_instance_id": "demo-bmi-reinstall-001",
                 "ssh_ok": False,
                 "external_ip": "",
+                "public_ip": "",
+                "key_file": args.key_file or "",
             }
         )
         print(json.dumps(result, indent=2))
@@ -314,10 +350,7 @@ def main() -> int:
             return 1
 
         if not _poll_bmi_deleted(client, args.instance_id, DELETE_TIMEOUT):
-            result["error"] = (
-                f"BareMetalInstance {args.instance_id} not confirmed deleted "
-                f"within {DELETE_TIMEOUT}s"
-            )
+            result["error"] = f"BareMetalInstance {args.instance_id} not confirmed deleted within {DELETE_TIMEOUT}s"
             print(json.dumps(result, indent=2))
             return 1
 
@@ -341,9 +374,18 @@ def main() -> int:
         host_type_value = ""
         if kubectl:
             rv = subprocess.run(
-                [kubectl, "get", "baremetalhost", bmh_name, "-n", bmh_ns,
-                 f"-o=jsonpath={{.metadata.labels.osac\\.openshift\\.io/host-type}}"],
-                capture_output=True, text=True, timeout=15,
+                [
+                    kubectl,
+                    "get",
+                    "baremetalhost",
+                    bmh_name,
+                    "-n",
+                    bmh_ns,
+                    "-o=jsonpath={.metadata.labels.osac\\.openshift\\.io/host-type}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
             host_type_value = rv.stdout.strip() if rv.returncode == 0 else ""
 
@@ -363,10 +405,9 @@ def main() -> int:
             # Generate a fresh key pair — SSH probe will use the new private key
             key_dir = tempfile.mkdtemp(prefix="osac-bmi-reinstall-")
             effective_key_file, pub_key = generate_ssh_key(key_dir)
+        result["key_file"] = effective_key_file
 
-        catalog_item_id = (
-            os.environ.get("OSAC_CATALOG_ITEM", "") or client.get_baremetal_catalog_item_id()
-        )
+        catalog_item_id = os.environ.get("OSAC_CATALOG_ITEM", "") or client.get_baremetal_catalog_item_id()
 
         # ------------------------------------------------------------------
         # 6. Create the new BMI
@@ -399,9 +440,7 @@ def main() -> int:
         # ------------------------------------------------------------------
         # 6b. Wait for the new BMI to reach RUNNING
         # ------------------------------------------------------------------
-        final_body = client.wait_bare_metal_instance_state(
-            new_bmi_id, "running", timeout=PROVISION_TIMEOUT
-        )
+        final_body = client.wait_bare_metal_instance_state(new_bmi_id, "running", timeout=PROVISION_TIMEOUT)
         raw_state = final_body.get("status", {}).get("state", "")
         state = raw_state.lower().removeprefix("bare_metal_instance_state_")
         result["state"] = state
@@ -432,6 +471,7 @@ def main() -> int:
         # ------------------------------------------------------------------
         external_ip = extract_external_ip(final_body) or args.external_ip or ""
         result["external_ip"] = external_ip
+        result["public_ip"] = external_ip
 
         # ------------------------------------------------------------------
         # 9. Optional SSH probe
