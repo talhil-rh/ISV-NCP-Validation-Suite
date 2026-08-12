@@ -114,6 +114,80 @@ class VpcCrudCheck(BaseValidation):
             self.set_failed(f"Failed tests: {', '.join(failed_tests)}")
 
 
+class VpcListedCheck(BaseValidation):
+    """Validate VPC listing includes the target VPC.
+
+    Config:
+        step_output: The step output to check
+
+    Step output:
+        tests: dict with list_vpcs, found_target, count_check
+        vpcs: list of VPC objects
+        count: total VPC count
+        found_target: whether target VPC was in listing
+    """
+
+    description: ClassVar[str] = "Check VPC list operation"
+
+    def run(self) -> None:
+        step_output = self.config.get("step_output", {})
+        tests = step_output.get("tests", {})
+
+        if not tests:
+            self.set_failed("No 'tests' in step output")
+            return
+
+        required_tests = ["list_vpcs", "found_target", "count_check"]
+        passed_tests = []
+        failed_tests = []
+
+        for test_name in required_tests:
+            test_result = tests.get(test_name, {})
+            if test_result.get("passed"):
+                passed_tests.append(test_name)
+            else:
+                error = test_result.get("error", "unknown error")
+                failed_tests.append(f"{test_name}: {error}")
+
+        if not failed_tests:
+            count = step_output.get("count", "?")
+            self.set_passed(f"VPC listing verified ({count} VPCs, target found)")
+        else:
+            self.set_failed(f"Failed tests: {', '.join(failed_tests)}")
+
+
+class VpcContainsExpectedSubnetCheck(BaseValidation):
+    """Validate that the VPC under test contains its expected subnet.
+
+    Config:
+        step_output: The step output to check
+
+    Step output:
+        tests: dict with subnet_assigned
+        vpc_id: VPC identifier
+        subnet_id: expected subnet identifier
+    """
+
+    description: ClassVar[str] = "Check VPC contains expected subnet"
+
+    def run(self) -> None:
+        step_output = self.config.get("step_output", {})
+        tests = step_output.get("tests", {})
+
+        if not tests:
+            self.set_failed("No 'tests' in step output")
+            return
+
+        test_result = tests.get("subnet_assigned", {})
+        if test_result.get("passed"):
+            vpc_id = step_output.get("vpc_id", "?")
+            subnet_id = step_output.get("subnet_id", "?")
+            self.set_passed(f"Subnet {subnet_id} is assigned to VPC {vpc_id}")
+        else:
+            error = test_result.get("error", "unknown error")
+            self.set_failed(f"subnet_assigned: {error}")
+
+
 class SubnetConfigCheck(BaseValidation):
     """Validate subnet configuration across availability zones.
 
@@ -892,6 +966,7 @@ class SdnFilterAuditTrailCheck(BaseValidation):
             ["trail_id", "actor_field", "target_rule_id"],
             "SDN filtering audit trail",
         )
+
 
 
 def _coerce_nonnegative_float(value: object, field_name: str) -> tuple[float | None, str | None]:
