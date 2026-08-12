@@ -27,7 +27,9 @@ from isvtest.validations.network import (
     SdnFilterAuditTrailCheck,
     SdnHardwareFaultLoggingCheck,
     SdnLatencyPerfLoggingCheck,
+    VpcContainsExpectedSubnetCheck,
     VpcIpConfigCheck,
+    VpcListedCheck,
 )
 
 # ---------------------------------------------------------------------------
@@ -612,3 +614,157 @@ class TestVpcIpConfigCheck:
         result = v.execute()
         assert result["passed"] is False
         assert "auto_assign_ip_enabled" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# VpcListedCheck
+# ---------------------------------------------------------------------------
+
+
+class TestVpcListedCheck:
+    """Tests for VpcListedCheck validation."""
+
+    def test_vpc_listed_all_pass(self) -> None:
+        """VPC list test passes with valid output."""
+        config = {
+            "step_output": {
+                "count": 2,
+                "found_target": True,
+                "vpcs": [
+                    {"id": "vpc-1", "name": "test-vpc-1", "cidr": "10.0.0.0/16"},
+                    {"id": "vpc-2", "name": "test-vpc-2", "cidr": "10.1.0.0/16"},
+                ],
+                "tests": {
+                    "list_vpcs": {"passed": True, "count": 2},
+                    "found_target": {"passed": True, "target_id": "vpc-2"},
+                    "count_check": {"passed": True},
+                },
+            },
+        }
+        v = VpcListedCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is True
+        assert "2 VPCs" in result["output"]
+
+    def test_vpc_listed_no_tests(self) -> None:
+        """Fail when tests dict is empty."""
+        config: dict[str, Any] = {
+            "step_output": {
+                "tests": {},
+            },
+        }
+        v = VpcListedCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "No 'tests' in step output" in result["error"]
+
+    def test_vpc_listed_target_not_found(self) -> None:
+        """Fail when target VPC is not in listing."""
+        config = {
+            "step_output": {
+                "count": 1,
+                "found_target": False,
+                "tests": {
+                    "list_vpcs": {"passed": True, "count": 1},
+                    "found_target": {"passed": False, "error": "Target VPC not found"},
+                    "count_check": {"passed": True},
+                },
+            },
+        }
+        v = VpcListedCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "found_target" in result["error"]
+
+    def test_vpc_listed_empty_list(self) -> None:
+        """Fail when no VPCs returned."""
+        config = {
+            "step_output": {
+                "count": 0,
+                "tests": {
+                    "list_vpcs": {"passed": True, "count": 0},
+                    "found_target": {"passed": False, "error": "No VPCs to search"},
+                    "count_check": {"passed": False, "error": "No VPCs returned"},
+                },
+            },
+        }
+        v = VpcListedCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "count_check" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# VpcContainsExpectedSubnetCheck
+# ---------------------------------------------------------------------------
+
+
+class TestVpcContainsExpectedSubnetCheck:
+    """Tests for VpcContainsExpectedSubnetCheck validation."""
+
+    def test_subnet_assigned_pass(self) -> None:
+        """Pass when subnet is assigned to the VPC."""
+        config = {
+            "step_output": {
+                "vpc_id": "vpc-abc",
+                "subnet_id": "subnet-123",
+                "tests": {
+                    "subnet_assigned": {
+                        "passed": True,
+                        "message": "Subnet subnet-123 belongs to VPC vpc-abc",
+                    },
+                },
+            },
+        }
+        v = VpcContainsExpectedSubnetCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is True
+        assert "subnet-123" in result["output"]
+        assert "vpc-abc" in result["output"]
+
+    def test_subnet_assigned_no_tests(self) -> None:
+        """Fail when tests dict is empty."""
+        config: dict[str, Any] = {
+            "step_output": {
+                "tests": {},
+            },
+        }
+        v = VpcContainsExpectedSubnetCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "No 'tests' in step output" in result["error"]
+
+    def test_subnet_assigned_wrong_vpc(self) -> None:
+        """Fail when subnet belongs to a different VPC."""
+        config = {
+            "step_output": {
+                "vpc_id": "vpc-abc",
+                "subnet_id": "subnet-123",
+                "tests": {
+                    "subnet_assigned": {
+                        "passed": False,
+                        "error": "Subnet subnet-123 belongs to VPC vpc-other, expected vpc-abc",
+                    },
+                },
+            },
+        }
+        v = VpcContainsExpectedSubnetCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "subnet_assigned" in result["error"]
+
+    def test_subnet_assigned_missing_test(self) -> None:
+        """Fail when subnet_assigned test is missing from output."""
+        config = {
+            "step_output": {
+                "vpc_id": "vpc-abc",
+                "subnet_id": "subnet-123",
+                "tests": {
+                    "other_test": {"passed": True},
+                },
+            },
+        }
+        v = VpcContainsExpectedSubnetCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "subnet_assigned" in result["error"]

@@ -151,6 +151,38 @@ commands:
         timeout: 400
 
       # =======================================================================
+      # TEST: VPC list (SDN01-05)
+      # =======================================================================
+      - name: list_vpcs
+        phase: test
+        command: "python3 ../scripts/network/list_vpcs_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+          - "--target-vpc-id"
+          - "{{steps.create_network.network_id}}"
+        timeout: 300
+
+      # =======================================================================
+      # TEST: Subnet assignment (SDN01-06)
+      # =======================================================================
+      - name: subnet_assignment
+        phase: test
+        command: "python3 ../scripts/network/subnet_assignment_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+          - "--target-vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--target-subnet-id"
+          - "{{steps.create_network.subnets[0].subnet_id}}"
+        timeout: 300
+
+      # =======================================================================
       # TEST: Subnet configuration
       # =======================================================================
       - name: subnet_config
@@ -263,6 +295,17 @@ commands:
           - "--tenant-namespace"
           - "{{steps.setup_tenant.tenant_namespace}}"
         timeout: 300
+
+      # =======================================================================
+      # TEST: VPC Flow Logs (SDN09-04)
+      # =======================================================================
+      - name: flow_logs_test
+        phase: test
+        command: "python3 ../scripts/network/flow_logs_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+        timeout: 120
 
       # =======================================================================
       # TEST: Floating IP (ExternalIP) switch between two instances (SDN05-01)

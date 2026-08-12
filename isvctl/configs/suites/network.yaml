@@ -143,6 +143,16 @@ tests:
           compose:
             - VpcCrudCheck:
                 operations: ["delete_vpc"]
+        VpcListedCheck:
+          test_id: "SDN01-05"
+          labels: ["min_req", "network"]
+          requires: []
+          step: list_vpcs
+        VpcContainsExpectedSubnetCheck:
+          test_id: "SDN01-06"
+          labels: ["min_req", "network"]
+          requires: []
+          step: subnet_assignment
         # no test id for subnet count / multi-AZ layout (SDN04-01 covers exclusive-subnet isolation, not subnet topology).
         SubnetConfigCheck:
           test_id: "N/A"
@@ -275,6 +285,10 @@ tests:
           labels: ["min_req", "network", "security"]
           requires: []
           step: sdn_filter_audit_trail
+        VpcFlowLogsCheck:
+          test_id: "SDN09-04"
+          labels: ["min_req", "network"]
+          step: flow_logs_test
 
     sdn:
       checks:
