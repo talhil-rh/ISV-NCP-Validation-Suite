@@ -172,6 +172,40 @@ commands:
         timeout: 30
 
       # =======================================================================
+      # TEST: DHCP/IP management (IPAM01-01) — SSH probe by validation
+      # =======================================================================
+      - name: dhcp_ip_test
+        phase: test
+        command: "python3 ../scripts/bare_metal/dhcp_ip_test.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+          - "--external-ip"
+          - "{{steps.launch_instance.external_ip}}"
+        timeout: 120
+
+      # =======================================================================
+      # TEST: Network connectivity from BMI
+      # =======================================================================
+      - name: connectivity_test
+        phase: test
+        command: "python3 ../scripts/bare_metal/connectivity_test.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+          - "--external-ip"
+          - "{{steps.launch_instance.external_ip}}"
+        timeout: 120
+
+      # =======================================================================
       # TEST: Stop instance (CNP01-07)
       # =======================================================================
       - name: stop_instance
@@ -377,6 +411,11 @@ tests:
             - ConnectivityCheck
             - OsCheck:
                 expected_os: "fedora"
+
+    dhcp_ip_checks:
+      checks:
+        DhcpIpManagementCheck:
+          user: "fedora"
 
   exclude:
     labels:

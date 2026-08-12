@@ -284,6 +284,22 @@ tests:
           compose:
             - ContainerRuntimeCheck
 
+    dhcp_ip_checks:
+      step: dhcp_ip_test
+      checks:
+        DhcpIpManagementCheck:
+          test_id: "IPAM01-01"
+          labels: ["bare_metal", "ssh"]
+          description: "Check DHCP/IP management via SSH on the bare metal host"
+
+    connectivity_checks:
+      step: connectivity_test
+      checks:
+        NetworkConnectivityCheck:
+          test_id: "N/A"
+          labels: ["bare_metal"]
+          description: "Check network connectivity from the bare metal host"
+
     stop_checks:
       step: stop_instance
       checks:
