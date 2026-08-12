@@ -54,7 +54,7 @@
 #   SDN07-01:   VPC peering (not available in OSAC)
 #   SDN11-01, DMS05-01: Stable IP checks (require compute instances)
 #   IPAM01-01:  DHCP/IP management (requires SSH to instances)
-#   IPAM02-01:  VPC IP config (DHCP options not exposed)
+#   IPAM02-01:  VPC IP config (VpcIpConfigCheck — DNS from CoreDNS, auto_assign_ip_mode=instance)
 #   N/A:        Connectivity / traffic flow (require compute instances)
 #
 # Usage:
@@ -110,6 +110,32 @@ commands:
           - "--tenant-namespace"
           - "{{steps.setup_tenant.tenant_namespace}}"
         timeout: 600
+
+      # =======================================================================
+      # TEST: GET VirtualNetwork by ID (VpcReadFromInventoryCheck / SDN01-02)
+      # =======================================================================
+      - name: get_vpc
+        phase: test
+        command: "python3 ../scripts/network/get_vpc.py"
+        args:
+          - "--vnet-id"
+          - "{{steps.create_network.network_id}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 30
+
+      # =======================================================================
+      # TEST: VPC IP config (IPAM02-01)
+      # =======================================================================
+      - name: vpc_ip_config
+        phase: test
+        command: "python3 ../scripts/network/vpc_ip_config.py"
+        args:
+          - "--vnet-id"
+          - "{{steps.create_network.network_id}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 30
 
       # =======================================================================
       # TEST: VPC (VirtualNetwork) CRUD (SDN01-01..04)
@@ -175,6 +201,70 @@ commands:
         timeout: 400
 
       # =======================================================================
+      # TEST: SG scoping checks (SDN02-05..10)
+      # =======================================================================
+      - name: sg_workload_scoping
+        phase: test
+        command: "python3 ../scripts/network/sg_workload_scoping_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 300
+
+      - name: sg_node_scoping
+        phase: test
+        command: "python3 ../scripts/network/sg_node_scoping_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 300
+
+      - name: sg_subnet_scoping
+        phase: test
+        command: "python3 ../scripts/network/sg_subnet_scoping_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 300
+
+      - name: sg_service_scoping
+        phase: test
+        command: "python3 ../scripts/network/sg_service_scoping_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 300
+
+      - name: sg_port_security_policy
+        phase: test
+        command: "python3 ../scripts/network/sg_port_security_policy_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 300
+
+      # =======================================================================
+      # TEST: BYOIP via ExternalIPPool (NET03-01)
+      # =======================================================================
+      - name: byoip_test
+        phase: test
+        command: "python3 ../scripts/network/byoip_test.py"
+        args:
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 300
+
+      # =======================================================================
       # TEST: Floating IP (ExternalIP) switch between two instances (SDN05-01)
       # =======================================================================
       - name: floating_ip_test
@@ -215,6 +305,13 @@ tests:
       checks:
         FloatingIpCheck:
           max_switch_seconds: 120
+
+    network:
+      checks:
+        VpcIpConfigCheck:
+          # OSAC assigns external IPs per-instance via ExternalIPAttachment,
+          # not at the subnet level — subnet-level auto_assign_public_ip doesn't apply.
+          auto_assign_ip_mode: "instance"
 
   exclude:
     labels: ["ssh"]

@@ -844,7 +844,7 @@ class FulfillmentClient:
         payload = json.dumps(
             {
                 "metadata": {"name": name},
-                "spec": {"pool": pool_id},
+                "spec": {"pool": {"id": pool_id}},
             }
         ).encode()
         return self._api_request("/api/fulfillment/v1/external_ips", method="POST", data=payload)
