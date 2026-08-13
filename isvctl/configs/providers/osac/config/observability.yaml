@@ -16,8 +16,9 @@
 # OSAC Observability Validation Configuration
 #
 # Implements telemetry, network telemetry, host syslog, CSI driver health,
-# CSI concurrent PVC, CSI PVC expand, and API network ACL checks using
-# OCP Prometheus, K8s node proxy API, and kubectl live probes.
+# CSI concurrent PVC, CSI PVC expand, SDN latency/perf logging, and API
+# network ACL checks using OCP Prometheus, K8s node proxy API, and kubectl
+# live probes.
 #
 # Usage:
 #   KUBECONFIG=/path/to/kubeconfig \
@@ -110,6 +111,15 @@ commands:
           - "--poll-timeout"
           - "300"
         timeout: 600
+
+      - name: sdn_latency_perf_logging
+        phase: test
+        command: "python3 ../scripts/observability/sdn_latency_perf_logging.py"
+        output_schema: generic
+        args:
+          - "--sample-window-seconds"
+          - "600"
+        timeout: 120
 
       - name: teardown_observability
         phase: teardown
@@ -220,6 +230,14 @@ tests:
           initial_size: "1Gi"
           expanded_size: "2Gi"
           expand_timeout_s: 180
+
+    sdn_latency_perf_logging:
+      step: sdn_latency_perf_logging
+      checks:
+        SdnLatencyPerfLoggingCheck:
+          test_id: "SDN09-02"
+          labels: ["network"]
+          description: "Check SDN latency/performance logging via OCP Prometheus"
 
     api_network_acl:
       checks:
