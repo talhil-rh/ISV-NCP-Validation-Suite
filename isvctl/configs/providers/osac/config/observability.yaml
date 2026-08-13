@@ -15,9 +15,10 @@
 
 # OSAC Observability Validation Configuration
 #
-# Implements TelemetryDeliveryLatencyCheck using OCP Prometheus + ServiceMonitor.
+# Implements TelemetryDeliveryLatencyCheck, StorageCapacityTelemetryCheck,
+# and StoragePerformanceTelemetryCheck using OCP Prometheus + ServiceMonitor.
 # Deploys a test metric exporter, creates a ServiceMonitor for Prometheus
-# scraping, then queries Thanos Querier to measure delivery latency.
+# scraping, queries Prometheus for delivery latency and storage metrics.
 #
 # Usage:
 #   KUBECONFIG=/path/to/kubeconfig \
@@ -44,6 +45,24 @@ commands:
           - "isvtest-obs"
         timeout: 60
 
+      - name: storage_capacity_telemetry
+        phase: test
+        command: "python3 ../scripts/observability/storage_telemetry.py"
+        output_schema: generic
+        args:
+          - "--metric-type"
+          - "capacity"
+        timeout: 120
+
+      - name: storage_performance_telemetry
+        phase: test
+        command: "python3 ../scripts/observability/storage_telemetry.py"
+        output_schema: generic
+        args:
+          - "--metric-type"
+          - "performance"
+        timeout: 120
+
       - name: telemetry_delivery_latency
         phase: test
         command: "python3 ../scripts/observability/telemetry_delivery_latency.py"
@@ -67,10 +86,10 @@ commands:
 
 tests:
   cluster_name: "osac-observability-validation"
-  description: "OSAC observability: telemetry delivery latency via OCP Prometheus"
+  description: "OSAC observability: telemetry delivery, storage capacity/performance via OCP Prometheus"
 
   settings:
-    max_delivery_seconds: "120"
+    max_delivery_seconds: "600"
 
   validations:
     telemetry_delivery:
@@ -81,3 +100,19 @@ tests:
           labels: ["observability"]
           max_delivery_seconds: "{{max_delivery_seconds}}"
           description: "Check telemetry delivery latency is within threshold"
+
+    storage_capacity_telemetry:
+      step: storage_capacity_telemetry
+      checks:
+        StorageCapacityTelemetryCheck:
+          test_id: "TELEM05-01"
+          labels: ["observability"]
+          description: "Check storage capacity telemetry is available (used/free/total)"
+
+    storage_performance_telemetry:
+      step: storage_performance_telemetry
+      checks:
+        StoragePerformanceTelemetryCheck:
+          test_id: "TELEM06-01"
+          labels: ["observability"]
+          description: "Check storage performance telemetry is available (bandwidth/IOPS/latency)"

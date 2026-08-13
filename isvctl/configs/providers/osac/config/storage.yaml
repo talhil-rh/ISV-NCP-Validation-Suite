@@ -17,7 +17,7 @@
 #
 # Implements the block-volume lifecycle checks (VolumeProvisionedCheck,
 # VolumeResizedCheck, VolumeSnapshotRestoredCheck, VolumeDeletedCheck,
-# VolumeHostRunningCheck) using K8s PVC, VolumeSnapshot, and CNV
+# VolumeHostRunningCheck, VolumePersistsAcrossRestartCheck) using K8s PVC, VolumeSnapshot, and CNV
 # VirtualMachine APIs instead of infrastructure-level block device operations.
 #
 # OSAC has no tenant-facing volume API; storage is consumed via standard K8s
@@ -65,6 +65,21 @@ commands:
           - "{{steps.launch_instance.namespace}}"
         timeout: 300
 
+      - name: volume_persistence
+        phase: test
+        command: "python3 ../scripts/storage/volume_persistence.py"
+        output_schema: generic
+        args:
+          - "--namespace"
+          - "{{steps.launch_instance.namespace}}"
+          - "--pvc-name"
+          - "{{steps.create_volume.volume_id}}"
+          - "--pod-name"
+          - "{{steps.create_volume.pod_name}}"
+          - "--expected-content"
+          - "{{steps.create_volume.sentinel_content}}"
+        timeout: 300
+
       - name: snapshot_lifecycle
         phase: test
         command: "python3 ../scripts/storage/snapshot_lifecycle.py"
@@ -90,7 +105,7 @@ commands:
           - "--pvc-name"
           - "{{steps.create_volume.volume_id}}"
           - "--pod-name"
-          - "{{steps.create_volume.pod_name}}"
+          - "{{steps.volume_persistence.pod_name}}"
           - "--mount-point"
           - "{{steps.create_volume.mount_point}}"
           - "--new-size"
@@ -139,6 +154,20 @@ tests:
                 fields: ["volume_id", "mount_point", "operations"]
             - CrudOperationsCheck:
                 operations: ["create", "attach", "format", "mount", "write_sentinel"]
+
+    volume_persistence:
+      step: volume_persistence
+      checks:
+        VolumePersistsAcrossRestartCheck:
+          test_id: "DATASVC04-01"
+          labels: ["storage"]
+          description: "Check a volume stays attached with its data after the instance restarts"
+          compose:
+            - StepSuccessCheck
+            - FieldExistsCheck:
+                fields: ["volume_id", "operations"]
+            - CrudOperationsCheck:
+                operations: ["stop", "start", "verify_attached", "verify_data"]
 
     snapshot_lifecycle:
       step: snapshot_lifecycle
