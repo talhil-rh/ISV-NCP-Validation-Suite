@@ -38,6 +38,8 @@
 #   N/A:          Network provisioned (NetworkProvisionedCheck)
 #   N/A:          Subnet configuration (SubnetConfigCheck)
 #   N/A:          Security blocking (SecurityBlockingCheck)
+#   SDN09-03:     SDN filter audit trail (SdnFilterAuditTrailCheck)
+#                 — K8s audit log for SecurityGroup CRD mutations
 #
 # Deferred (need OCP pod connectivity probes — follow-up PR):
 #   SDN02-05..09: SG scoping (workload/node/subnet/service)
@@ -47,7 +49,7 @@
 # Not applicable to OSAC:
 #   NET01-01, NET02-02: Physical fabric (BackendSwitchFabric, NvlinkDomain)
 #   SDN08-01:   Storage L3 routing (physical storage network)
-#   SDN09-01..03: SDN hardware logging (no physical SDN controller)
+#   SDN09-01..02: SDN hardware/latency logging (no physical SDN controller)
 #   NET03-01:   BYOIP (not available in OSAC)
 #   SDN05-01:   Floating IP (requires compute instances)
 #   SDN06-01:   Localized DNS (not available in OSAC)
@@ -306,6 +308,21 @@ commands:
           - "--region"
           - "{{region}}"
         timeout: 120
+
+      # =======================================================================
+      # TEST: SDN filter audit trail (SDN09-03)
+      # =======================================================================
+      - name: sdn_filter_audit_trail
+        phase: test
+        command: "python3 ../scripts/network/sdn_filter_audit_trail_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+          - "--vnet-id"
+          - "{{steps.create_network.network_id}}"
+        timeout: 900
 
       # =======================================================================
       # TEST: Floating IP (ExternalIP) switch between two instances (SDN05-01)
