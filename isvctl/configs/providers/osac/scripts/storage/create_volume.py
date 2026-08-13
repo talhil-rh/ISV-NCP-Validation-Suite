@@ -74,11 +74,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Create PVC volume with sentinel data (OSAC)")
     parser.add_argument("--storage-class", required=True)
     parser.add_argument("--size", default="10Gi")
-    parser.add_argument("--namespace-prefix", default="isvtest-vol")
+    parser.add_argument("--namespace", required=True, help="Pre-existing namespace (created by launch_instance)")
     args = parser.parse_args()
 
     suffix = uuid.uuid4().hex[:8]
-    namespace = f"{args.namespace_prefix}-{suffix}"
+    namespace = args.namespace
     pvc_name = f"vol-{suffix}"
     pod_name = f"vol-pod-{suffix}"
     sentinel_content = f"isv-sentinel-{suffix}"
@@ -104,13 +104,6 @@ def main() -> int:
         return 0
 
     try:
-        # Create namespace
-        rc, _, err = run_kubectl("create", "namespace", namespace)
-        if rc != 0:
-            result["error"] = f"Failed to create namespace: {err}"
-            print(json.dumps(result, indent=2))
-            return 1
-
         # CREATE: apply PVC
         pvc_manifest = f"""\
 apiVersion: v1

@@ -16,8 +16,9 @@
 # OSAC Storage Validation Configuration
 #
 # Implements the block-volume lifecycle checks (VolumeProvisionedCheck,
-# VolumeResizedCheck, VolumeSnapshotRestoredCheck) using K8s PVC and
-# VolumeSnapshot APIs instead of infrastructure-level block device operations.
+# VolumeResizedCheck, VolumeSnapshotRestoredCheck, VolumeDeletedCheck,
+# VolumeHostRunningCheck) using K8s PVC, VolumeSnapshot, and CNV
+# VirtualMachine APIs instead of infrastructure-level block device operations.
 #
 # OSAC has no tenant-facing volume API; storage is consumed via standard K8s
 # PVCs backed by CSI drivers (VAST, Trident, etc.). The provider scripts
@@ -40,6 +41,17 @@ commands:
   storage:
     phases: ["setup", "test", "teardown"]
     steps:
+      - name: launch_instance
+        phase: setup
+        command: "python3 ../scripts/storage/launch_instance.py"
+        output_schema: generic
+        args:
+          - "--namespace-prefix"
+          - "isvtest-vol"
+          - "--storage-class"
+          - "{{storage_class}}"
+        timeout: 600
+
       - name: create_volume
         phase: setup
         command: "python3 ../scripts/storage/create_volume.py"
@@ -49,6 +61,8 @@ commands:
           - "{{storage_class}}"
           - "--size"
           - "{{volume_size_gib}}Gi"
+          - "--namespace"
+          - "{{steps.launch_instance.namespace}}"
         timeout: 300
 
       - name: snapshot_lifecycle
@@ -57,7 +71,7 @@ commands:
         output_schema: generic
         args:
           - "--namespace"
-          - "{{steps.create_volume.namespace}}"
+          - "{{steps.launch_instance.namespace}}"
           - "--pvc-name"
           - "{{steps.create_volume.volume_id}}"
           - "--expected-content"
@@ -72,7 +86,7 @@ commands:
         output_schema: generic
         args:
           - "--namespace"
-          - "{{steps.create_volume.namespace}}"
+          - "{{steps.launch_instance.namespace}}"
           - "--pvc-name"
           - "{{steps.create_volume.volume_id}}"
           - "--pod-name"
@@ -88,7 +102,7 @@ commands:
         command: "python3 ../scripts/storage/teardown.py"
         args:
           - "--namespace"
-          - "{{steps.create_volume.namespace}}"
+          - "{{steps.launch_instance.namespace}}"
         timeout: 60
 
 tests:
@@ -101,6 +115,17 @@ tests:
     expanded_size_gib: "20"
 
   validations:
+    instance_launched:
+      step: launch_instance
+      checks:
+        VolumeHostRunningCheck:
+          test_id: "N/A"
+          labels: ["storage"]
+          expected_state: "running"
+          description: "Check the CNV VM that will host the test volume is running"
+          compose:
+            - InstanceStateCheck
+
     fixture_volume:
       step: create_volume
       checks:
@@ -142,3 +167,13 @@ tests:
                 fields: ["volume_id", "operations"]
             - CrudOperationsCheck:
                 operations: ["modify_volume", "grow_partition", "resize_filesystem", "verify_size"]
+
+    teardown_checks:
+      step: teardown_storage
+      checks:
+        VolumeDeletedCheck:
+          test_id: "N/A"
+          labels: ["storage"]
+          description: "Check the storage namespace and PVCs are cleaned up at teardown"
+          compose:
+            - StepSuccessCheck
