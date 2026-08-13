@@ -15,11 +15,9 @@
 
 # OSAC Observability Validation Configuration
 #
-# Implements telemetry, network telemetry, host syslog, and CSI driver
-# health checks using OCP Prometheus, K8s node proxy API, and kubectl.
-# Deploys a test metric exporter, creates a ServiceMonitor for Prometheus
-# scraping, queries Prometheus for delivery latency, storage, and network
-# metrics, verifies host syslogs, and checks CSI driver health.
+# Implements telemetry, network telemetry, host syslog, CSI driver health,
+# CSI concurrent PVC, CSI PVC expand, and API network ACL checks using
+# OCP Prometheus, K8s node proxy API, and kubectl live probes.
 #
 # Usage:
 #   KUBECONFIG=/path/to/kubeconfig \
@@ -123,7 +121,7 @@ commands:
 
 tests:
   cluster_name: "osac-observability-validation"
-  description: "OSAC observability: telemetry, network telemetry, host syslog, CSI driver health"
+  description: "OSAC observability: telemetry, network telemetry, host syslog, CSI/storage, API ACL"
 
   settings:
     max_delivery_seconds: "600"
@@ -200,3 +198,35 @@ tests:
                   deployment: "lvms-operator"
                 node:
                   daemonset: "vg-manager"
+
+    csi_concurrent_pvc:
+      checks:
+        K8sCsiConcurrentPvcCheck:
+          test_id: "DATASVC08-01"
+          labels: ["storage"]
+          description: "Check CSI provisions multiple concurrent PVCs with distinct PVs"
+          storage_class: "lvms-vg1"
+          pvc_count: 2
+          pvc_size: "1Gi"
+          bind_timeout_s: 120
+
+    csi_pvc_expand:
+      checks:
+        K8sCsiPvcExpandCheck:
+          test_id: "DATASVC09-01"
+          labels: ["storage"]
+          description: "Check CSI PVC expansion updates PV and filesystem size"
+          storage_class: "lvms-vg1"
+          initial_size: "1Gi"
+          expanded_size: "2Gi"
+          expand_timeout_s: 180
+
+    api_network_acl:
+      checks:
+        K8sApiNetworkAclCheck:
+          test_id: "SEC15-01"
+          labels: ["security"]
+          description: "Check K8s API is protected by network access controls"
+          commands:
+            unauthorized_probe: "kubectl --as=system:anonymous --as-group=system:unauthenticated get namespaces"
+          probe_timeout_s: 15
