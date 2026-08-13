@@ -24,6 +24,7 @@ import pytest
 
 from isvtest.validations.network import (
     DhcpIpManagementCheck,
+    NetworkConnectivityCheck,
     SdnFilterAuditTrailCheck,
     SdnHardwareFaultLoggingCheck,
     SdnLatencyPerfLoggingCheck,
@@ -172,7 +173,9 @@ DHCP_PROC_AND_LEASE = (
     "  fixed-address 10.0.1.5;\n"
     "  option domain-name-servers 10.0.0.2;\n"
     '  option domain-name "ec2.internal";\n'
-    "}"
+    "}\n"
+    "---DHCP_ROUTE---\n"
+    "NO_DEFAULT_ROUTE"
 )
 
 DHCP_LEASE_ONLY = (
@@ -183,9 +186,24 @@ DHCP_LEASE_ONLY = (
     "ADDRESS=10.0.1.5/24\n"
     "DNS=10.0.0.2\n"
     "DOMAINNAME=ec2.internal\n"
+    "---DHCP_ROUTE---\n"
+    "NO_DEFAULT_ROUTE"
 )
 
-DHCP_NONE = "---DHCP_PROC---\nNO_DHCP_PROCESS\n---DHCP_LEASE---\nNO_LEASE_FILES"
+DHCP_NONE = (
+    "---DHCP_PROC---\nNO_DHCP_PROCESS\n"
+    "---DHCP_LEASE---\nNO_LEASE_FILES\n"
+    "---DHCP_ROUTE---\nNO_DEFAULT_ROUTE"
+)
+
+DHCP_ROUTE_ONLY = (
+    "---DHCP_PROC---\n"
+    "NO_DHCP_PROCESS\n"
+    "---DHCP_LEASE---\n"
+    "NO_LEASE_FILES\n"
+    "---DHCP_ROUTE---\n"
+    "default via 192.168.160.1 dev eth0 proto dhcp src 192.168.160.210 metric 100"
+)
 
 IP_ADDR_MATCH = "10.0.1.5\n"
 
@@ -425,6 +443,28 @@ class TestDhcpIpManagementCheck:
         assert lease_subtest is not None
         assert lease_subtest["passed"] is True
         assert "lease file found" in lease_subtest["message"]
+
+    @patch("isvtest.validations.network.get_ssh_client")
+    @patch("isvtest.validations.network.run_ssh_command")
+    def test_dhcp_route_only(self, mock_run: MagicMock, mock_ssh: MagicMock) -> None:
+        """Pass when default route has proto dhcp (no standalone process or lease files)."""
+        mock_ssh.return_value = MagicMock()
+        mock_run.side_effect = _mock_ssh_run(
+            {
+                "pgrep": (0, DHCP_ROUTE_ONLY, ""),
+                "ip -4 addr": (0, IP_ADDR_MATCH, ""),
+                "resolv.conf": (0, RESOLV_WITH_DNS, ""),
+            }
+        )
+
+        v = DhcpIpManagementCheck(config=_dhcp_config())
+        result = v.execute()
+        assert result["passed"] is True
+        subtests = result.get("subtests", [])
+        lease_subtest = next((s for s in subtests if s["name"] == "dhcp_lease_active"), None)
+        assert lease_subtest is not None
+        assert lease_subtest["passed"] is True
+        assert "default route via DHCP" in lease_subtest["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -768,3 +808,77 @@ class TestVpcContainsExpectedSubnetCheck:
         result = v.execute()
         assert result["passed"] is False
         assert "subnet_assigned" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# TestNetworkConnectivityCheck
+# ---------------------------------------------------------------------------
+
+
+class TestNetworkConnectivityCheck:
+    """Tests for NetworkConnectivityCheck validation."""
+
+    def test_connectivity_all_pass(self):
+        config = {
+            "step_output": {
+                "instances": [
+                    {"instance_id": "i-1", "private_ip": "10.0.0.1", "public_ip": "1.2.3.4"},
+                ],
+                "tests": {
+                    "ssh_reachable": {"passed": True, "message": "ok"},
+                    "ping_gateway": {"passed": True, "message": "ok"},
+                },
+            },
+        }
+        v = NetworkConnectivityCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is True
+        assert "1 instances" in result["output"]
+
+    def test_connectivity_no_instances(self):
+        config = {"step_output": {"instances": [], "tests": {}}}
+        v = NetworkConnectivityCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "No 'instances'" in result["error"]
+
+    def test_connectivity_no_ips(self):
+        config = {
+            "step_output": {
+                "instances": [{"instance_id": "i-1"}],
+                "tests": {},
+            },
+        }
+        v = NetworkConnectivityCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "No instances have IP" in result["error"]
+
+    def test_connectivity_test_fails(self):
+        config = {
+            "step_output": {
+                "instances": [
+                    {"instance_id": "i-1", "private_ip": "10.0.0.1"},
+                ],
+                "tests": {
+                    "ssh_reachable": {"passed": True},
+                    "ping_gateway": {"passed": False, "message": "timeout"},
+                },
+            },
+        }
+        v = NetworkConnectivityCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "ping_gateway" in result["error"]
+
+    def test_connectivity_no_tests_still_passes(self):
+        config = {
+            "step_output": {
+                "instances": [
+                    {"instance_id": "i-1", "public_ip": "1.2.3.4"},
+                ],
+            },
+        }
+        v = NetworkConnectivityCheck(config=config)
+        result = v.execute()
+        assert result["passed"] is True

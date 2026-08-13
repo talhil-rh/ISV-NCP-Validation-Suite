@@ -523,7 +523,11 @@ class DhcpIpManagementCheck(BaseValidation):
             ssh.close()
 
     def _check_dhcp_lease(self, ssh: paramiko.SSHClient) -> None:
-        """Check that a DHCP client is active and a valid lease exists."""
+        """Check that a DHCP client is active and a valid lease exists.
+
+        Detects standalone DHCP clients (dhclient, dhcpcd, systemd-networkd)
+        as well as NetworkManager's internal DHCP client (nmcli ip4.method=auto).
+        """
         cmd = (
             "echo '---DHCP_PROC---' && "
             "(pgrep -a 'dhclient|dhcpcd|systemd-network' 2>/dev/null || echo 'NO_DHCP_PROCESS') && "
@@ -532,26 +536,40 @@ class DhcpIpManagementCheck(BaseValidation):
             "/run/systemd/netif/leases/* "
             "/var/lib/NetworkManager/internal-*.lease "
             "/var/lib/NetworkManager/dhclient-*.lease "
-            "2>/dev/null || echo 'NO_LEASE_FILES')"
+            "/run/NetworkManager/internal-*.lease "
+            "/run/NetworkManager/dhclient-*.lease "
+            "2>/dev/null || echo 'NO_LEASE_FILES') && "
+            "echo '---DHCP_ROUTE---' && "
+            "(ip route show default 2>/dev/null || echo 'NO_DEFAULT_ROUTE')"
         )
         _exit_code, stdout, _ = run_ssh_command(ssh, cmd)
 
         proc_section = ""
         lease_section = ""
+        route_section = ""
         if "---DHCP_PROC---" in stdout and "---DHCP_LEASE---" in stdout:
             parts = stdout.split("---DHCP_LEASE---")
             proc_section = parts[0].split("---DHCP_PROC---")[-1].strip()
-            lease_section = parts[1].strip()
+            rest = parts[1]
+            if "---DHCP_ROUTE---" in rest:
+                lease_section, route_section = rest.split("---DHCP_ROUTE---", 1)
+                lease_section = lease_section.strip()
+                route_section = route_section.strip()
+            else:
+                lease_section = rest.strip()
 
         has_process = "NO_DHCP_PROCESS" not in proc_section and proc_section != ""
         has_lease = "NO_LEASE_FILES" not in lease_section and lease_section != ""
+        has_dhcp_route = "proto dhcp" in route_section.lower()
 
-        if has_process or has_lease:
+        if has_process or has_lease or has_dhcp_route:
             details = []
             if has_process:
                 details.append("DHCP process running")
             if has_lease:
                 details.append("lease file found")
+            if has_dhcp_route:
+                details.append("default route via DHCP")
             self.report_subtest("dhcp_lease_active", True, "; ".join(details))
         else:
             self.report_subtest("dhcp_lease_active", False, "No DHCP process or lease files found")
