@@ -32,6 +32,10 @@
 #   SEC08-01: Audit log entries (AuditLogEntryCheck)
 #   SEC08-02: Audit log retention (AuditLogRetentionCheck)
 #   SEC09-01: Certificate rotation (CertRotationCycleCheck)
+#   SEC13-01: Mutual TLS enforcement (MutualTlsCheck)
+#             — TLS on OpenShift routes + OVN IPsec for east-west
+#   SEC13-02: Insecure protocols disabled (InsecureProtocolsCheck)
+#             — SSLv3/TLSv1.0/TLSv1.1/HTTP probes on edge endpoints
 #
 # Not applicable to OSAC (virtual infrastructure, no bare metal):
 #   SEC12-01..03, CNP10-01: BMC checks (no BMC/IPMI/Redfish)
@@ -215,6 +219,28 @@ commands:
       - name: cert_rotation_test
         phase: test
         command: "python3 ../scripts/security/cert_rotation_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+        timeout: 120
+
+      # =======================================================================
+      # TEST: Insecure Protocols (SEC13-02)
+      # =======================================================================
+      - name: insecure_protocols_test
+        phase: test
+        command: "python3 ../scripts/security/insecure_protocols_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+        timeout: 120
+
+      # =======================================================================
+      # TEST: Mutual TLS (SEC13-01)
+      # =======================================================================
+      - name: mutual_tls_test
+        phase: test
+        command: "python3 ../scripts/security/mutual_tls_test.py"
         args:
           - "--region"
           - "{{region}}"
