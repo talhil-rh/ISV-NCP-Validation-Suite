@@ -15,10 +15,11 @@
 
 # OSAC Observability Validation Configuration
 #
-# Implements TelemetryDeliveryLatencyCheck, StorageCapacityTelemetryCheck,
-# and StoragePerformanceTelemetryCheck using OCP Prometheus + ServiceMonitor.
+# Implements telemetry, network telemetry, host syslog, and CSI driver
+# health checks using OCP Prometheus, K8s node proxy API, and kubectl.
 # Deploys a test metric exporter, creates a ServiceMonitor for Prometheus
-# scraping, queries Prometheus for delivery latency and storage metrics.
+# scraping, queries Prometheus for delivery latency, storage, and network
+# metrics, verifies host syslogs, and checks CSI driver health.
 #
 # Usage:
 #   KUBECONFIG=/path/to/kubeconfig \
@@ -63,6 +64,42 @@ commands:
           - "performance"
         timeout: 120
 
+      - name: management_network_telemetry
+        phase: test
+        command: "python3 ../scripts/observability/network_telemetry.py"
+        output_schema: generic
+        args:
+          - "--telemetry-type"
+          - "management"
+        timeout: 120
+
+      - name: east_west_network_telemetry
+        phase: test
+        command: "python3 ../scripts/observability/network_telemetry.py"
+        output_schema: generic
+        args:
+          - "--telemetry-type"
+          - "east-west"
+        timeout: 120
+
+      - name: host_nic_network_telemetry
+        phase: test
+        command: "python3 ../scripts/observability/network_telemetry.py"
+        output_schema: generic
+        args:
+          - "--telemetry-type"
+          - "host-nic"
+        timeout: 120
+
+      - name: host_syslog
+        phase: test
+        command: "python3 ../scripts/observability/host_syslog.py"
+        output_schema: generic
+        args:
+          - "--max-age-seconds"
+          - "600"
+        timeout: 120
+
       - name: telemetry_delivery_latency
         phase: test
         command: "python3 ../scripts/observability/telemetry_delivery_latency.py"
@@ -86,7 +123,7 @@ commands:
 
 tests:
   cluster_name: "osac-observability-validation"
-  description: "OSAC observability: telemetry delivery, storage capacity/performance via OCP Prometheus"
+  description: "OSAC observability: telemetry, network telemetry, host syslog, CSI driver health"
 
   settings:
     max_delivery_seconds: "600"
@@ -116,3 +153,50 @@ tests:
           test_id: "TELEM06-01"
           labels: ["observability"]
           description: "Check storage performance telemetry is available (bandwidth/IOPS/latency)"
+
+    management_network_telemetry:
+      step: management_network_telemetry
+      checks:
+        ManagementNetworkTelemetryCheck:
+          test_id: "TELEM07-01"
+          labels: ["observability"]
+          description: "Check management network telemetry is available via OVS metrics"
+
+    east_west_network_telemetry:
+      step: east_west_network_telemetry
+      checks:
+        EastWestNetworkTelemetryCheck:
+          test_id: "TELEM08-01"
+          labels: ["observability"]
+          description: "Check east-west network telemetry is available via container metrics"
+
+    host_nic_network_telemetry:
+      step: host_nic_network_telemetry
+      checks:
+        HostNicNetworkTelemetryCheck:
+          test_id: "TELEM09-01"
+          labels: ["observability"]
+          description: "Check host NIC network telemetry is available via node-exporter"
+
+    host_syslog:
+      step: host_syslog
+      checks:
+        HostSyslogCheck:
+          test_id: "OBS06-01"
+          labels: ["observability"]
+          description: "Check host syslogs are available and recent via K8s node proxy API"
+
+    csi_driver_health:
+      checks:
+        K8sCsiDriverHealthCheck:
+          test_id: "DATASVC07-01"
+          labels: ["storage"]
+          description: "Check CSI driver is installed and healthy"
+          drivers:
+            - storage_classes: ["lvms-vg1"]
+              workloads:
+                namespace: "openshift-storage"
+                controller:
+                  deployment: "lvms-operator"
+                node:
+                  daemonset: "vg-manager"
