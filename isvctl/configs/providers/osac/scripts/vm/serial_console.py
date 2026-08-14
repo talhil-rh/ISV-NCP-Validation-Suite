@@ -47,6 +47,8 @@ def main() -> int:
     parser.add_argument("--region", required=True)
     parser.add_argument("--sa-token", required=True)
     parser.add_argument("--tenant-namespace", default="")
+    parser.add_argument("--vm-name", default="")
+    parser.add_argument("--vm-namespace", default="")
     args = parser.parse_args()
 
     result: dict[str, Any] = {
@@ -80,35 +82,28 @@ def main() -> int:
         else:
             # Fallback: probe the underlying KubeVirt VMI serial console
             kubectl = shutil.which("kubectl") or shutil.which("oc") or "kubectl"
-            # The ComputeInstance CRD name follows the pattern ci-<id>
-            crd_ns = config.tenant_namespace
-            probe = subprocess.run(
-                [
-                    kubectl,
-                    "get",
-                    "virtualmachineinstance",
-                    "-n",
-                    crd_ns,
-                    "-l",
-                    f"osac.openshift.io/compute-instance-uuid={args.instance_id}",
-                    "-o",
-                    "jsonpath={.items[0].metadata.name}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            vmi_name = probe.stdout.strip()
-            if vmi_name:
-                # VMI exists, serial console is available via virtctl
-                result["console_available"] = True
-                result["serial_access_enabled"] = True
-                result["output_length"] = 0  # Cannot capture output without interactive session
-                result["success"] = True
+            vm_name = args.vm_name
+            vm_ns = args.vm_namespace
+            if vm_name and vm_ns:
+                probe = subprocess.run(
+                    [kubectl, "get", "virtualmachineinstance", vm_name, "-n", vm_ns, "--no-headers"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if probe.returncode == 0 and probe.stdout.strip():
+                    result["console_available"] = True
+                    result["serial_access_enabled"] = True
+                    result["output_length"] = 0
+                    result["success"] = True
+                else:
+                    result["error"] = (
+                        f"Console access probe returned HTTP {cs} and no VMI {vm_name} "
+                        f"found in {vm_ns}"
+                    )
             else:
                 result["error"] = (
-                    f"Console access probe returned HTTP {cs} and no VMI found "
-                    f"for compute instance {args.instance_id}"
+                    f"Console access probe returned HTTP {cs} and no --vm-name/--vm-namespace provided"
                 )
 
     except Exception as exc:

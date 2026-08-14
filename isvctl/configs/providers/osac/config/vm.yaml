@@ -145,6 +145,10 @@ commands:
           - "{{steps.launch_instance.instance_id}}"
           - "--region"
           - "{{region}}"
+          - "--vm-name"
+          - "{{steps.launch_instance.vm_name}}"
+          - "--vm-namespace"
+          - "{{steps.launch_instance.vm_namespace}}"
         timeout: 60
 
       # =======================================================================
@@ -181,6 +185,10 @@ commands:
           - "{{steps.setup_vm_tenant.sa_token}}"
           - "--tenant-namespace"
           - "{{steps.setup_vm_tenant.tenant_namespace}}"
+          - "--vm-name"
+          - "{{steps.launch_instance.vm_name}}"
+          - "--vm-namespace"
+          - "{{steps.launch_instance.vm_namespace}}"
         sensitive_args: ["--sa-token"]
         timeout: 60
 
@@ -214,6 +222,10 @@ commands:
           - "{{region}}"
           - "--sa-token"
           - "{{steps.setup_vm_tenant.sa_token}}"
+          - "--vm-name"
+          - "{{steps.launch_instance.vm_name}}"
+          - "--vm-namespace"
+          - "{{steps.launch_instance.vm_namespace}}"
         sensitive_args: ["--sa-token"]
         timeout: 360
 
@@ -230,6 +242,10 @@ commands:
           - "{{region}}"
           - "--sa-token"
           - "{{steps.setup_vm_tenant.sa_token}}"
+          - "--vm-name"
+          - "{{steps.launch_instance.vm_name}}"
+          - "--vm-namespace"
+          - "{{steps.launch_instance.vm_namespace}}"
         sensitive_args: ["--sa-token"]
         timeout: 700
 
@@ -246,6 +262,10 @@ commands:
           - "{{region}}"
           - "--sa-token"
           - "{{steps.setup_vm_tenant.sa_token}}"
+          - "--vm-name"
+          - "{{steps.launch_instance.vm_name}}"
+          - "--vm-namespace"
+          - "{{steps.launch_instance.vm_namespace}}"
         sensitive_args: ["--sa-token"]
         timeout: 700
 

@@ -53,6 +53,8 @@ def main() -> int:
     parser.add_argument("--instance-id", required=True)
     parser.add_argument("--region", required=True)
     parser.add_argument("--sa-token", required=True)
+    parser.add_argument("--vm-name", default="")
+    parser.add_argument("--vm-namespace", default="")
     args = parser.parse_args()
 
     result: dict[str, Any] = {
@@ -77,26 +79,9 @@ def main() -> int:
     try:
         config = get_env_config(require_admin=False)
         kubectl = shutil.which("kubectl") or shutil.which("oc") or "kubectl"
-        crd_ns = config.tenant_namespace
 
-        # Find the VM name from the ComputeInstance CRD
-        probe = subprocess.run(
-            [
-                kubectl,
-                "get",
-                "virtualmachine",
-                "-n",
-                crd_ns,
-                "-l",
-                f"osac.openshift.io/compute-instance-uuid={args.instance_id}",
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        vm_name = probe.stdout.strip()
+        vm_name = args.vm_name
+        vm_ns = args.vm_namespace
         if not vm_name:
             result["error"] = f"No VirtualMachine found for compute instance {args.instance_id}"
             print(json.dumps(result, indent=2))
@@ -110,7 +95,7 @@ def main() -> int:
                 "virtualmachine",
                 vm_name,
                 "-n",
-                crd_ns,
+                vm_ns,
                 "--type",
                 "merge",
                 "-p",

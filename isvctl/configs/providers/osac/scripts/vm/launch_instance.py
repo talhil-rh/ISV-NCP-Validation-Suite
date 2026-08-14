@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -65,6 +67,8 @@ def main() -> int:
         "requested_key_name": KEY_NAME,
         "key_name": KEY_NAME,
         "instance_type": args.instance_type,
+        "vm_name": "",
+        "vm_namespace": "",
     }
 
     if DEMO_MODE:
@@ -75,6 +79,8 @@ def main() -> int:
         result["vpc_id"] = "demo-vpc-0001"
         result["security_group_id"] = ""
         result["state"] = "running"
+        result["vm_name"] = "vm-demo"
+        result["vm_namespace"] = "subnet-demo"
         result["tests"] = {
             "specified_key": {
                 "passed": True,
@@ -111,6 +117,26 @@ def main() -> int:
 
         # Wait for RUNNING
         client.wait_compute_instance_running(instance_id, timeout=600, token=args.sa_token)
+
+        # Find VM name and namespace from ComputeInstance CRD
+        kubectl = shutil.which("kubectl") or shutil.which("oc") or "kubectl"
+        ci_probe = subprocess.run(
+            [
+                kubectl, "get", "computeinstance", "-n", config.tenant_namespace,
+                "-l", f"osac.openshift.io/computeinstance-uuid={instance_id}",
+                "-o", "json",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        if ci_probe.returncode == 0 and ci_probe.stdout.strip():
+            ci_data = json.loads(ci_probe.stdout)
+            ci_items = ci_data.get("items", [])
+            if ci_items:
+                ci = ci_items[0]
+                result["vm_name"] = ci["metadata"]["name"]
+                result["vm_namespace"] = ci["metadata"].get("annotations", {}).get(
+                    "osac.openshift.io/subnet-target-namespace", config.tenant_namespace
+                )
 
         # Refresh instance state
         gs, gb = client.get_compute_instance(instance_id, token=args.sa_token)

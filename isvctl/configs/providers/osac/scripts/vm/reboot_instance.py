@@ -51,6 +51,8 @@ def main() -> int:
     parser.add_argument("--instance-id", required=True)
     parser.add_argument("--region", required=True)
     parser.add_argument("--sa-token", required=True)
+    parser.add_argument("--vm-name", default="")
+    parser.add_argument("--vm-namespace", default="")
     args = parser.parse_args()
 
     result: dict[str, Any] = {
@@ -79,28 +81,11 @@ def main() -> int:
     try:
         config = get_env_config(require_admin=False)
         kubectl = shutil.which("kubectl") or shutil.which("oc") or "kubectl"
-        crd_ns = config.tenant_namespace
 
-        # Find the VMI name from the ComputeInstance label
-        probe = subprocess.run(
-            [
-                kubectl,
-                "get",
-                "virtualmachineinstance",
-                "-n",
-                crd_ns,
-                "-l",
-                f"osac.openshift.io/compute-instance-uuid={args.instance_id}",
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        vmi_name = probe.stdout.strip()
-        if not vmi_name:
-            result["error"] = f"No VirtualMachineInstance found for compute instance {args.instance_id}"
+        vm_name = args.vm_name
+        vm_ns = args.vm_namespace
+        if not vm_name:
+            result["error"] = "No --vm-name provided (passed from launch_instance step)"
             print(json.dumps(result, indent=2))
             return 1
 
@@ -108,7 +93,7 @@ def main() -> int:
 
         # Delete the VMI to trigger a restart from the VM controller
         delete = subprocess.run(
-            [kubectl, "delete", "virtualmachineinstance", vmi_name, "-n", crd_ns],
+            [kubectl, "delete", "virtualmachineinstance", vm_name, "-n", vm_ns],
             capture_output=True,
             text=True,
             timeout=30,

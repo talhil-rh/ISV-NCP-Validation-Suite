@@ -42,31 +42,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 
 
-def _check_vm_devices(kubectl: str, crd_ns: str, instance_id: str) -> dict[str, Any]:
+def _check_vm_devices(kubectl: str, vm_name: str, vm_namespace: str) -> dict[str, Any]:
     """Inspect the VirtualMachine spec for hardening violations."""
     probe = subprocess.run(
-        [
-            kubectl,
-            "get",
-            "virtualmachine",
-            "-n",
-            crd_ns,
-            "-l",
-            f"osac.openshift.io/compute-instance-uuid={instance_id}",
-            "-o",
-            "json",
-        ],
+        [kubectl, "get", "virtualmachine", vm_name, "-n", vm_namespace, "-o", "json"],
         capture_output=True,
         text=True,
         timeout=15,
     )
     if probe.returncode != 0 or not probe.stdout.strip():
-        raise RuntimeError(f"No VirtualMachine found for compute instance {instance_id}")
+        raise RuntimeError(f"No VirtualMachine {vm_name} found in {vm_namespace}")
 
     data = json.loads(probe.stdout)
-    items = data.get("items", [])
+    items = [data] if data.get("kind") == "VirtualMachine" else data.get("items", [])
     if not items:
-        raise RuntimeError(f"No VirtualMachine found for compute instance {instance_id}")
+        raise RuntimeError(f"No VirtualMachine {vm_name} found in {vm_namespace}")
 
     vm_spec = items[0].get("spec", {}).get("template", {}).get("spec", {})
     domain = vm_spec.get("domain", {})
@@ -129,6 +119,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Virtual device hardening (OSAC)")
     parser.add_argument("--instance-id", required=True)
     parser.add_argument("--region", required=True)
+    parser.add_argument("--vm-name", default="")
+    parser.add_argument("--vm-namespace", default="")
     args = parser.parse_args()
 
     result: dict[str, Any] = {
@@ -153,9 +145,13 @@ def main() -> int:
 
         config = get_env_config(require_admin=False)
         kubectl = shutil.which("kubectl") or shutil.which("oc") or "kubectl"
-        crd_ns = config.tenant_namespace
 
-        tests = _check_vm_devices(kubectl, crd_ns, args.instance_id)
+        vm_name = args.vm_name
+        vm_ns = args.vm_namespace
+        if not vm_name:
+            raise RuntimeError("--vm-name is required (passed from launch_instance step)")
+
+        tests = _check_vm_devices(kubectl, vm_name, vm_ns)
         result["tests"] = tests
         result["success"] = all(t.get("passed", False) for t in tests.values())
 
