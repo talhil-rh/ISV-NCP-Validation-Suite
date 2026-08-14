@@ -95,7 +95,10 @@ def main() -> int:
         config = get_env_config()
         if not config.fulfillment_grpc_address:
             raise RuntimeError("OSAC_FULFILLMENT_GRPC_ADDRESS is required")
-        admin_token = get_admin_token(config)
+        try:
+            admin_token = get_admin_token(config)
+        except Exception:
+            admin_token, _ = create_sa_token(config.tenant_namespace, "admin")
 
         suffix = f"{int(time.time()) % 0xFFFF:04x}"
         tenant_name = f"isv-vm-tenant-{suffix}"

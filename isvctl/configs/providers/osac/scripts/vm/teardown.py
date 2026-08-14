@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.osac_client import (
     FulfillmentClient,
     TenantClient,
+    create_sa_token,
     get_admin_token,
     get_env_config,
     grpcurl_call,
@@ -81,7 +82,10 @@ def main() -> int:
     try:
         config = get_env_config(require_admin=False)
         admin_config = get_env_config()
-        admin_token = get_admin_token(admin_config)
+        try:
+            admin_token = get_admin_token(admin_config)
+        except Exception:
+            admin_token, _ = create_sa_token(admin_config.tenant_namespace, "admin")
 
         # 1. Delete ComputeInstance
         if args.instance_id and args.sa_token:
