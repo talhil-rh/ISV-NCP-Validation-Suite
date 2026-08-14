@@ -217,47 +217,10 @@ def main() -> int:
         vnet_id = vb["id"]
         result["vpc_id"] = vnet_id
 
-        # Read network class implementation strategy from private API
-        nc_obj = vb.get("spec", {}).get("network_class", {})
-        nc_id = (nc_obj.get("id") if isinstance(nc_obj, dict) else nc_obj) or network_class
-        impl_strategy = ""
-        try:
-            nc_s, nc_b = client._private_request(f"/api/private/v1/network_classes/{nc_id}", admin_token)
-            if nc_s == 200:
-                impl_strategy = nc_b.get("implementation_strategy", "")
-        except Exception:
-            pass
-
-        # Create VNet CRD for operator reconciliation
+        # Wait for fulfillment-controller to reconcile VNet CRD and reach READY
         crd_ns = config.tenant_namespace
-        vnet_spec: dict = {"region": args.region, "ipv4Cidr": cidr, "networkClass": nc_id}
-        if impl_strategy:
-            vnet_spec["implementationStrategy"] = impl_strategy
-        subprocess.run(
-            [kubectl, "apply", "-f", "-"],
-            input=json.dumps(
-                {
-                    "apiVersion": "osac.openshift.io/v1alpha1",
-                    "kind": "VirtualNetwork",
-                    "metadata": {
-                        "name": vnet_name,
-                        "namespace": crd_ns,
-                        "labels": {
-                            "osac.openshift.io/virtualnetwork-uuid": vnet_id,
-                            "osac.openshift.io/tenant": namespace,
-                        },
-                    },
-                    "spec": vnet_spec,
-                }
-            ),
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
-
         wait_crd_ready("virtualnetwork", vnet_id, crd_ns, label="osac.openshift.io/virtualnetwork-uuid")
 
-        # Wait for fulfillment VNet to reach READY
         vnet_deadline = time.time() + 120
         while time.time() < vnet_deadline:
             vnet_status, vnet_body = tenant_client.get_virtual_network(vnet_name)
@@ -274,32 +237,6 @@ def main() -> int:
         if ss not in (200, 201):
             raise RuntimeError(f"create subnet failed (HTTP {ss}): {sb}")
         sub_id = sb["id"]
-
-        subprocess.run(
-            [kubectl, "apply", "-f", "-"],
-            input=json.dumps(
-                {
-                    "apiVersion": "osac.openshift.io/v1alpha1",
-                    "kind": "Subnet",
-                    "metadata": {
-                        "name": sub_name,
-                        "namespace": crd_ns,
-                        "labels": {
-                            "osac.openshift.io/subnet-uuid": sub_id,
-                            "osac.openshift.io/virtualnetwork-uuid": vnet_id,
-                            "osac.openshift.io/tenant": namespace,
-                        },
-                    },
-                    "spec": {
-                        "virtualNetwork": vnet_id,
-                        "ipv4Cidr": sub_cidr,
-                    },
-                }
-            ),
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
 
         wait_crd_ready("subnet", sub_id, crd_ns, label="osac.openshift.io/subnet-uuid")
         result["subnet_id"] = sub_id
