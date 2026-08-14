@@ -101,24 +101,33 @@ def main() -> int:
 
         # Apply workload CIDR rule
         s, b = client.update_security_group(
-            sg_id, "spec.ingress",
-            {"spec": {"virtual_network": {"id": vnet_id}, "ingress": [
-                {"protocol": "PROTOCOL_TCP", "port_from": 443, "port_to": 443, "ipv4_cidr": WORKLOAD_CIDR},
-            ]}},
+            sg_id,
+            "spec.ingress",
+            {
+                "spec": {
+                    "virtual_network": {"id": vnet_id},
+                    "ingress": [
+                        {"protocol": "PROTOCOL_TCP", "port_from": 443, "port_to": 443, "ipv4_cidr": WORKLOAD_CIDR},
+                    ],
+                }
+            },
         )
-        result["tests"]["apply_workload_rule"] = {"passed": s == 200,
-                                                   **({"error": f"HTTP {s}"} if s != 200 else {})}
+        result["tests"]["apply_workload_rule"] = {"passed": s == 200, **({"error": f"HTTP {s}"} if s != 200 else {})}
 
         # Verify workload CIDR is in rules
         s, b = client.get_security_group(sg_id)
         if s == 200:
             cidrs = _ingress_cidrs(b)
             allowed = WORKLOAD_CIDR in cidrs
-            result["tests"]["workload_allowed"] = {"passed": allowed,
-                                                    **({"error": f"{WORKLOAD_CIDR} not in rules: {cidrs}"} if not allowed else {})}
+            result["tests"]["workload_allowed"] = {
+                "passed": allowed,
+                **({"error": f"{WORKLOAD_CIDR} not in rules: {cidrs}"} if not allowed else {}),
+            }
             blocked = OTHER_CIDR not in cidrs
-            result["tests"]["other_workload_blocked"] = {"passed": blocked,
-                                                          **({"error": f"{OTHER_CIDR} unexpectedly in rules"} if not blocked else {})}
+            result["tests"]["other_workload_blocked"] = {
+                "passed": blocked,
+                **({"error": f"{OTHER_CIDR} unexpectedly in rules"} if not blocked else {}),
+            }
         else:
             result["tests"]["workload_allowed"]["error"] = f"GET SG HTTP {s}"
             result["tests"]["other_workload_blocked"]["error"] = f"GET SG HTTP {s}"

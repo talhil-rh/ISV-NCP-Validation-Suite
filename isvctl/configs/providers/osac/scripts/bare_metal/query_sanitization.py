@@ -133,10 +133,7 @@ def main() -> int:
         external_host_id = r.stdout.strip() if r.returncode == 0 else ""
 
         if not external_host_id or "/" not in external_host_id:
-            result["error"] = (
-                f"Could not find BMI CRD for {args.instance_id} in {operator_ns}: "
-                f"{r.stderr.strip()}"
-            )
+            result["error"] = f"Could not find BMI CRD for {args.instance_id} in {operator_ns}: {r.stderr.strip()}"
             print(json.dumps(result, indent=2))
             return 1
 
@@ -147,9 +144,7 @@ def main() -> int:
         bmh = _oc_get_json("baremetalhost", bmh_name, bmh_ns)
 
         # 3. Extract provisioning state from the BMH status.
-        provisioning_state = (
-            bmh.get("status", {}).get("provisioning", {}).get("state", "")
-        )
+        provisioning_state = bmh.get("status", {}).get("provisioning", {}).get("state", "")
 
         # 4. Determine sanitized: Ironic wrote a fresh OS image when the BMH
         #    is in the "provisioned" state, which wipes previous OS-partition data.

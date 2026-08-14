@@ -48,12 +48,14 @@ def main() -> int:
     }
 
     if DEMO_MODE:
-        result.update({
-            "success": True,
-            "vpcs": [{"vpc_id": args.vnet_id, "vpc_name": "isv-net-demo"}],
-            "count": 1,
-            "found_target": True,
-        })
+        result.update(
+            {
+                "success": True,
+                "vpcs": [{"vpc_id": args.vnet_id, "vpc_name": "isv-net-demo"}],
+                "count": 1,
+                "found_target": True,
+            }
+        )
         print(json.dumps(result, indent=2))
         return 0
 

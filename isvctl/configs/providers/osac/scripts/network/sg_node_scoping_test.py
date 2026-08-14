@@ -98,23 +98,32 @@ def main() -> int:
         result["tests"]["create_sg"] = {"passed": True, "sg_id": sg_id}
 
         s, b = client.update_security_group(
-            sg_id, "spec.ingress",
-            {"spec": {"virtual_network": {"id": vnet_id}, "ingress": [
-                {"protocol": "PROTOCOL_TCP", "port_from": 22, "port_to": 22, "ipv4_cidr": TARGET_NODE_CIDR},
-            ]}},
+            sg_id,
+            "spec.ingress",
+            {
+                "spec": {
+                    "virtual_network": {"id": vnet_id},
+                    "ingress": [
+                        {"protocol": "PROTOCOL_TCP", "port_from": 22, "port_to": 22, "ipv4_cidr": TARGET_NODE_CIDR},
+                    ],
+                }
+            },
         )
-        result["tests"]["apply_node_rule"] = {"passed": s == 200,
-                                               **({"error": f"HTTP {s}"} if s != 200 else {})}
+        result["tests"]["apply_node_rule"] = {"passed": s == 200, **({"error": f"HTTP {s}"} if s != 200 else {})}
 
         s, b = client.get_security_group(sg_id)
         if s == 200:
             cidrs = _ingress_cidrs(b)
             allowed = TARGET_NODE_CIDR in cidrs
-            result["tests"]["target_node_allowed"] = {"passed": allowed,
-                                                       **({"error": f"{TARGET_NODE_CIDR} not in rules"} if not allowed else {})}
+            result["tests"]["target_node_allowed"] = {
+                "passed": allowed,
+                **({"error": f"{TARGET_NODE_CIDR} not in rules"} if not allowed else {}),
+            }
             blocked = OTHER_NODE_CIDR not in cidrs
-            result["tests"]["other_node_blocked"] = {"passed": blocked,
-                                                       **({"error": f"{OTHER_NODE_CIDR} unexpectedly in rules"} if not blocked else {})}
+            result["tests"]["other_node_blocked"] = {
+                "passed": blocked,
+                **({"error": f"{OTHER_NODE_CIDR} unexpectedly in rules"} if not blocked else {}),
+            }
         else:
             result["tests"]["target_node_allowed"]["error"] = f"GET SG HTTP {s}"
             result["tests"]["other_node_blocked"]["error"] = f"GET SG HTTP {s}"

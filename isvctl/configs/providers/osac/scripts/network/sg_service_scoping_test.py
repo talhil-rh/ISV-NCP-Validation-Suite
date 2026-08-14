@@ -99,13 +99,23 @@ def main() -> int:
 
         # Apply service port rule
         s, b = client.update_security_group(
-            sg_id, "spec.ingress",
-            {"spec": {"virtual_network": {"id": vnet_id}, "ingress": [
-                {"protocol": "PROTOCOL_TCP", "port_from": SERVICE_PORT, "port_to": SERVICE_PORT, "ipv4_cidr": "0.0.0.0/0"},
-            ]}},
+            sg_id,
+            "spec.ingress",
+            {
+                "spec": {
+                    "virtual_network": {"id": vnet_id},
+                    "ingress": [
+                        {
+                            "protocol": "PROTOCOL_TCP",
+                            "port_from": SERVICE_PORT,
+                            "port_to": SERVICE_PORT,
+                            "ipv4_cidr": "0.0.0.0/0",
+                        },
+                    ],
+                }
+            },
         )
-        result["tests"]["apply_service_rule"] = {"passed": s == 200,
-                                                   **({"error": f"HTTP {s}"} if s != 200 else {})}
+        result["tests"]["apply_service_rule"] = {"passed": s == 200, **({"error": f"HTTP {s}"} if s != 200 else {})}
 
         s, b = client.get_security_group(sg_id)
         if s == 200:
