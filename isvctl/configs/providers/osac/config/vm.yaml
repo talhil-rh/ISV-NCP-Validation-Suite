@@ -139,7 +139,7 @@ commands:
       # =======================================================================
       - name: virtual_device_hardening
         phase: test
-        best_effort: true
+        continue_on_failure: true
         command: "python3 ../scripts/vm/virtual_device_hardening.py"
         args:
           - "--instance-id"
@@ -157,7 +157,7 @@ commands:
       # =======================================================================
       - name: component_key_access
         phase: test
-        best_effort: true
+        continue_on_failure: true
         command: "python3 ../scripts/vm/component_key_access.py"
         args:
           - "--instance-id"
@@ -168,6 +168,10 @@ commands:
           - "{{region}}"
           - "--sa-token"
           - "{{steps.setup_vm_tenant.sa_token}}"
+          - "--vm-name"
+          - "{{steps.launch_instance.vm_name}}"
+          - "--vm-namespace"
+          - "{{steps.launch_instance.vm_namespace}}"
         sensitive_args: ["--sa-token"]
         timeout: 60
 
@@ -176,7 +180,7 @@ commands:
       # =======================================================================
       - name: serial_console
         phase: test
-        best_effort: true
+        continue_on_failure: true
         command: "python3 ../scripts/vm/serial_console.py"
         args:
           - "--instance-id"
@@ -199,7 +203,7 @@ commands:
       # =======================================================================
       - name: console_rbac
         phase: test
-        best_effort: true
+        continue_on_failure: true
         command: "python3 ../scripts/vm/console_rbac.py"
         args:
           - "--instance-id"
@@ -208,6 +212,10 @@ commands:
           - "{{region}}"
           - "--sa-token"
           - "{{steps.setup_vm_tenant.sa_token}}"
+          - "--vm-name"
+          - "{{steps.launch_instance.vm_name}}"
+          - "--vm-namespace"
+          - "{{steps.launch_instance.vm_namespace}}"
         sensitive_args: ["--sa-token"]
         timeout: 60
 
