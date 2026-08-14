@@ -93,10 +93,11 @@ def main() -> int:
 
         # Delete the VMI to trigger a restart from the VM controller
         delete = subprocess.run(
-            [kubectl, "delete", "virtualmachineinstance", vm_name, "-n", vm_ns],
+            [kubectl, "delete", "virtualmachineinstance", vm_name, "-n", vm_ns,
+             "--timeout=120s"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=180,
         )
         if delete.returncode != 0:
             result["error"] = f"kubectl delete VMI failed: {delete.stderr.strip()}"
