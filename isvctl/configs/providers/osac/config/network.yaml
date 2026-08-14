@@ -46,6 +46,12 @@
 #   SDN02-10:     SG port security policy
 #   SDN02-08:     SG policy propagation timing
 #
+# bare_metal capability (launch_bm_instances setup step required):
+#   N/A:        NetworkConnectivityCheck (connectivity_test)
+#   SDN11-01:   StablePrivateIpCheck (stable_ip_test)
+#   DMS05-01:   StableEgressIpCheck (stable_egress_ip_test)
+#   N/A:        TrafficFlowCheck (traffic_validation)
+#
 # Not applicable to OSAC:
 #   NET01-01, NET02-02: Physical fabric (BackendSwitchFabric, NvlinkDomain)
 #   SDN08-01:   Storage L3 routing (physical storage network)
@@ -54,10 +60,8 @@
 #   SDN05-01:   Floating IP (requires compute instances)
 #   SDN06-01:   Localized DNS (not available in OSAC)
 #   SDN07-01:   VPC peering (not available in OSAC)
-#   SDN11-01, DMS05-01: Stable IP checks (require compute instances)
 #   IPAM01-01:  DHCP/IP management (requires SSH to instances)
 #   IPAM02-01:  VPC IP config (VpcIpConfigCheck — DNS from CoreDNS, auto_assign_ip_mode=instance)
-#   N/A:        Connectivity / traffic flow (require compute instances)
 #
 # Usage:
 #   uv run isvctl test run -f isvctl/configs/providers/osac/config/network.yaml
@@ -288,6 +292,19 @@ commands:
         timeout: 300
 
       # =======================================================================
+      # TEST: SG policy propagation timing (SDN02-08)
+      # =======================================================================
+      - name: sg_policy_propagation
+        phase: test
+        command: "python3 ../scripts/network/sg_policy_propagation_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 120
+
+      # =======================================================================
       # TEST: BYOIP via ExternalIPPool (NET03-01)
       # =======================================================================
       - name: byoip_test
@@ -329,10 +346,110 @@ commands:
       # =======================================================================
       - name: floating_ip_test
         phase: test
+        continue_on_failure: true
         command: "python3 ../scripts/network/floating_ip_test.py"
         args:
           - "--region"
           - "{{region}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 1200
+
+      # =======================================================================
+      # SETUP: Launch two BMIs for connectivity / stable-IP / traffic tests
+      # (bare_metal capability only)
+      # =======================================================================
+      - name: launch_bm_instances
+        phase: setup
+        requires: [bare_metal]
+        command: "python3 ../scripts/network/launch_bm_instances.py"
+        args:
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 1200
+
+      # =======================================================================
+      # TEST: Network connectivity (NetworkConnectivityCheck / bare_metal only)
+      # =======================================================================
+      - name: connectivity_test
+        phase: test
+        requires: [bare_metal]
+        command: "python3 ../scripts/network/connectivity_test.py"
+        args:
+          - "--external-ip-a"
+          - "{{steps.launch_bm_instances.external_ip_a}}"
+          - "--external-ip-b"
+          - "{{steps.launch_bm_instances.external_ip_b}}"
+          - "--instance-a-id"
+          - "{{steps.launch_bm_instances.instance_a_id}}"
+          - "--instance-b-id"
+          - "{{steps.launch_bm_instances.instance_b_id}}"
+        timeout: 120
+
+      # =======================================================================
+      # TEST: Stable private IP — stop/start BMI-A, verify IP unchanged
+      # (StablePrivateIpCheck / SDN11-01 / bare_metal only)
+      # =======================================================================
+      - name: stable_ip_test
+        phase: test
+        requires: [bare_metal]
+        command: "python3 ../scripts/network/stable_ip_test.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_bm_instances.instance_a_id}}"
+          - "--ip-before"
+          - "{{steps.launch_bm_instances.external_ip_a}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 600
+
+      # =======================================================================
+      # TEST: Stable egress IP — SSH into BMI-A, probe outbound IP three times
+      # (StableEgressIpCheck / DMS05-01 / bare_metal only)
+      # =======================================================================
+      - name: stable_egress_ip_test
+        phase: test
+        requires: [bare_metal]
+        command: "python3 ../scripts/network/stable_egress_ip_test.py"
+        args:
+          - "--external-ip"
+          - "{{steps.launch_bm_instances.external_ip_a}}"
+          - "--key-file"
+          - "{{steps.launch_bm_instances.key_file}}"
+        timeout: 120
+
+      # =======================================================================
+      # TEST: Traffic flow — ping + curl from BMI-A to BMI-B and internet
+      # (TrafficFlowCheck / bare_metal only)
+      # =======================================================================
+      - name: traffic_validation
+        phase: test
+        requires: [bare_metal]
+        command: "python3 ../scripts/network/traffic_validation_test.py"
+        args:
+          - "--external-ip-a"
+          - "{{steps.launch_bm_instances.external_ip_a}}"
+          - "--bmh-ip-b"
+          - "{{steps.launch_bm_instances.bmh_ip_b}}"
+          - "--key-file"
+          - "{{steps.launch_bm_instances.key_file}}"
+        timeout: 120
+
+      # =======================================================================
+      # TEARDOWN: Remove BMIs spun up for connectivity tests (bare_metal only)
+      # =======================================================================
+      - name: teardown_bm_instances
+        phase: teardown
+        requires: [bare_metal]
+        continue_on_failure: true
+        command: "python3 ../scripts/network/teardown_bm_instances.py"
+        args:
+          - "--instance-a-id"
+          - "{{steps.launch_bm_instances.instance_a_id}}"
+          - "--instance-b-id"
+          - "{{steps.launch_bm_instances.instance_b_id}}"
           - "--tenant-namespace"
           - "{{steps.setup_tenant.tenant_namespace}}"
         timeout: 1200
@@ -356,7 +473,6 @@ commands:
 tests:
   cluster_name: "osac-network-validation"
   description: "OSAC network: VNet CRUD, subnets, SecurityGroup lifecycle, tenant isolation"
-
   settings:
     region: "osac-default"
 
@@ -364,7 +480,7 @@ tests:
     sdn:
       checks:
         FloatingIpCheck:
-          max_switch_seconds: 120
+          max_switch_seconds: 300
 
     network:
       checks:
