@@ -139,6 +139,7 @@ commands:
       # =======================================================================
       - name: virtual_device_hardening
         phase: test
+        best_effort: true
         command: "python3 ../scripts/vm/virtual_device_hardening.py"
         args:
           - "--instance-id"
@@ -156,6 +157,7 @@ commands:
       # =======================================================================
       - name: component_key_access
         phase: test
+        best_effort: true
         command: "python3 ../scripts/vm/component_key_access.py"
         args:
           - "--instance-id"

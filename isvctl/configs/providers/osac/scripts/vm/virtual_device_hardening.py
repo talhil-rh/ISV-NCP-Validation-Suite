@@ -62,20 +62,23 @@ def _check_vm_devices(kubectl: str, vm_name: str, vm_namespace: str) -> dict[str
     domain = vm_spec.get("domain", {})
     devices = domain.get("devices", {})
 
-    # Check 1: USB devices disabled
+    # Check 1: USB redirection disabled
+    # KubeVirt adds a default USB tablet for pointer coordination — this is
+    # standard and not a USB redirection concern. Only flag non-tablet USB
+    # input devices (e.g. explicit passthrough or redirect configs).
     inputs = devices.get("inputs", [])
-    usb_inputs = [i for i in inputs if i.get("bus") == "usb"]
-    usb_disabled = len(usb_inputs) == 0
+    usb_redirect_inputs = [
+        i for i in inputs
+        if i.get("bus") == "usb" and i.get("type") != "tablet"
+    ]
+    usb_disabled = len(usb_redirect_inputs) == 0
 
-    # Check for USB controller explicitly added
-    # KubeVirt may add a default USB controller; check if it's explicitly disabled
-    # In the absence of explicit USB redirection config, treat as disabled
     usb_result: dict[str, Any] = {
         "passed": usb_disabled,
         "probes": ["vm_spec_inputs"],
     }
     if not usb_disabled:
-        usb_result["message"] = f"Found {len(usb_inputs)} USB input device(s) in VM spec"
+        usb_result["message"] = f"Found {len(usb_redirect_inputs)} USB redirection device(s) in VM spec"
 
     # Check 2: Clipboard disabled (no SPICE/QXL agent channel)
     # KubeVirt VMs with autoattachGraphicsDevice: false have no SPICE agent
