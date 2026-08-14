@@ -84,7 +84,7 @@ def main() -> int:
             print(json.dumps(result, indent=2))
             return 1
 
-        # Stop the VM by patching spec.running = false
+        # Stop the VM by setting runStrategy to Halted
         patch = subprocess.run(
             [
                 kubectl,
@@ -96,7 +96,7 @@ def main() -> int:
                 "--type",
                 "merge",
                 "-p",
-                '{"spec":{"running":false}}',
+                '{"spec":{"runStrategy":"Halted"}}',
             ],
             capture_output=True,
             text=True,

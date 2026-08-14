@@ -87,7 +87,7 @@ def main() -> int:
             print(json.dumps(result, indent=2))
             return 1
 
-        # Start the VM by patching spec.running = true
+        # Start the VM by setting runStrategy to Always
         patch = subprocess.run(
             [
                 kubectl,
@@ -99,7 +99,7 @@ def main() -> int:
                 "--type",
                 "merge",
                 "-p",
-                '{"spec":{"running":true}}',
+                '{"spec":{"runStrategy":"Always"}}',
             ],
             capture_output=True,
             text=True,
