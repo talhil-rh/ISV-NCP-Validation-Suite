@@ -69,12 +69,20 @@ def run_kubectl(*args: str, stdin: str | None = None, timeout: int = 60) -> tupl
 
 
 def ensure_namespace() -> bool:
-    rc, _, _ = run_kubectl("create", "namespace", TEST_NS, "--dry-run=client", "-o", "yaml")
+    rc, ns_yaml, _ = run_kubectl("create", "namespace", TEST_NS, "--dry-run=client", "-o", "yaml")
     if rc != 0:
         return False
-    rc, ns_yaml, _ = run_kubectl("create", "namespace", TEST_NS, "--dry-run=client", "-o", "yaml")
-    rc2, _, _ = run_kubectl("apply", "-f", "-", stdin=ns_yaml)
-    return rc2 == 0
+    rc, _, _ = run_kubectl("apply", "-f", "-", stdin=ns_yaml)
+    if rc != 0:
+        return False
+    # Grant anyuid SCC so pods can run as root — use 'oc' directly since
+    # 'kubectl adm policy' is an OCP-only subcommand
+    subprocess.run(
+        ["oc", "adm", "policy", "add-scc-to-user", "anyuid",
+         "-z", "default", "-n", TEST_NS],
+        capture_output=True, text=True, timeout=30,
+    )
+    return True
 
 
 def cleanup_namespace() -> None:
@@ -146,8 +154,21 @@ def write_file_as_root(filename: str) -> tuple[bool, str]:
             break
         time.sleep(3)
     else:
+        _, events, _ = run_kubectl(
+            "get", "events", "-n", TEST_NS,
+            "--field-selector", f"involvedObject.name={pod_name}",
+            "--sort-by=.lastTimestamp", timeout=10,
+        )
+        _, phase_dbg, _ = run_kubectl(
+            "get", "pod", pod_name, "-n", TEST_NS,
+            "-o", "jsonpath={.status.phase} {.status.conditions}", timeout=10,
+        )
         run_kubectl("delete", "pod", pod_name, "-n", TEST_NS, "--force", timeout=15)
-        return False, "pod timed out"
+        diag = f"pod timed out (phase={phase_dbg})"
+        if events:
+            last_lines = "\n".join(events.strip().splitlines()[-3:])
+            diag += f"\nevents:\n{last_lines}"
+        return False, diag
 
     # Get logs
     _, logs, _ = run_kubectl("logs", pod_name, "-n", TEST_NS)
