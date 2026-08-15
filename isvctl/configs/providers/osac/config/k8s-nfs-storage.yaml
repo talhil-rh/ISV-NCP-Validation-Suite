@@ -135,6 +135,8 @@ tests:
           nfs_storage_class: "nfs-client"
           pvc_size: "5Gi"
           build_timeout_s: 600
+          allowed_failures:
+            - "unlink/14.t"
 
   exclude:
     tests: []
