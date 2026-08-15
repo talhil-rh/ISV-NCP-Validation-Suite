@@ -395,7 +395,7 @@ def main() -> int:
                 f"'",
                 timeout=15,
             )
-            rc, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
+            rc, repq_out, _ = nfs_exec("repquota", "-nup", NFS_EXPORT_PATH)
             if rc == 0 and str(TEST_UID) in repq_out and "4096" in repq_out:
                 result["tests"]["filesystem_quota_configured"] = {
                     "passed": True,
@@ -418,7 +418,7 @@ def main() -> int:
                 "message": f"setquota update failed: {err}",
             }
         else:
-            rc, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
+            rc, repq_out, _ = nfs_exec("repquota", "-nup", NFS_EXPORT_PATH)
             if rc == 0 and "8192" in repq_out:
                 result["tests"]["filesystem_quota_updated"] = {
                     "passed": True,
@@ -431,8 +431,9 @@ def main() -> int:
                 }
 
         # --- filesystem_quota_enforced ---
-        # Set tight 1MB hard limit, then try to write 2MB AS TEST_UID
+        # Remove probe file from configured test so its blocks don't count against the 1MB limit
         nfs_exec("sh", "-c", f"rm -f {server_testdir}/quota-probe.dat")
+        # Set tight 1MB hard limit, then try to write 2MB AS TEST_UID
         nfs_exec("setquota", "-u", str(TEST_UID), "0", "1024", "0", "0", NFS_EXPORT_PATH)
 
         rc, dd_out, dd_err = nfs_exec(
@@ -459,7 +460,7 @@ def main() -> int:
 
         if not quota_hit:
             # Check repquota for over-limit marker
-            rc3, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
+            rc3, repq_out, _ = nfs_exec("repquota", "-nup", NFS_EXPORT_PATH)
             if rc3 == 0:
                 for line in repq_out.splitlines():
                     if str(TEST_UID) in line and ("+" in line or "*" in line):
@@ -498,7 +499,7 @@ def main() -> int:
             f"'",
             timeout=15,
         )
-        rc, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
+        rc, repq_out, _ = nfs_exec("repquota", "-nup", NFS_EXPORT_PATH)
         uid_found = False
         uid1_usage = 0
         if rc == 0:
@@ -527,19 +528,19 @@ def main() -> int:
             }
 
         # --- gid_usage_accounted ---
-        # Write file with TEST_GID as primary group
+        # Temporarily set isvquota1's primary group to TEST_GID so writes
+        # are attributed to that GID in quota accounting
+        nfs_exec("usermod", "-g", str(TEST_GID), "isvquota1")
         nfs_exec(
             "sh", "-c",
-            f"sg isvgrp1 -c '"
-            f"dd if=/dev/zero of={server_testdir}/gid-test/file1.dat bs=1K count=512 2>/dev/null"
-            f"' 2>/dev/null || "
             f"su -s /bin/sh isvquota1 -c '"
             f"dd if=/dev/zero of={server_testdir}/gid-test/file1.dat bs=1K count=512 2>/dev/null"
-            f"';"
-            f"chgrp {TEST_GID} {server_testdir}/gid-test/file1.dat 2>/dev/null",
+            f"'",
             timeout=15,
         )
-        rc, repq_out, _ = nfs_exec("repquota", "-gp", NFS_EXPORT_PATH)
+        # Restore primary group
+        nfs_exec("usermod", "-g", str(TEST_UID), "isvquota1")
+        rc, repq_out, _ = nfs_exec("repquota", "-ngp", NFS_EXPORT_PATH)
         gid_found = False
         gid_usage = 0
         if rc == 0:
@@ -576,7 +577,7 @@ def main() -> int:
             f"'",
             timeout=15,
         )
-        rc, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
+        rc, repq_out, _ = nfs_exec("repquota", "-nup", NFS_EXPORT_PATH)
         uid1_usage = 0
         uid2_usage = 0
         if rc == 0:
