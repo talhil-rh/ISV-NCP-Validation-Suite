@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OSAC GPU Cluster Validation Configuration
+# Runs K8s GPU validation checks on a multi-node OCP cluster with NVIDIA A10 GPU.
+# No GPU label exclusion — this config is for clusters with GPU hardware.
+#
+# Target: osac-gpu-oci11 (3x masters + 1x VM.GPU.A10.1 worker)
+#
+# Usage:
+#   KUBECONFIG=~/.kube/osac-gpu-oci11.kubeconfig \
+#     uv run isvctl test run -f isvctl/configs/providers/osac/config/k8s-gpu.yaml --phase test
+
+import: ../../ocp/config/k8s.yaml
+
+version: "1.0"
+
+commands:
+  kubernetes:
+    steps:
+      - name: setup
+        phase: setup
+        command: "python3 ../../ocp/scripts/k8s/setup.py"
+        output_schema: cluster
+        timeout: 300
+
+      - name: teardown
+        phase: teardown
+        command: "python3 ../../ocp/scripts/k8s/teardown.py"
+        timeout: 30
+
+tests:
+  description: "OSAC GPU cluster validation (OCP + A10)"
+
+  validations:
+    kubernetes:
+      checks:
+        K8sGpuOperatorNamespaceCheck:
+          namespace: "nvidia-gpu-operator"
+        K8sGpuOperatorPodsCheck:
+          namespace: "nvidia-gpu-operator"
+        K8sGpuCapacityCheck:
+          resource_name: "nvidia.com/gpu"
+          expected_per_node: 1
+          expected_total: 1
+        K8sNvidiaSmiCheck:
+          runtime_class: ""
+        K8sGpuPodAccessCheck:
+          gpu_count: 1
+          total_gpu_count: 1
+          runtime_class: ""
+        K8sDriverVersionCheck:
+          driver_version: "580.82.07"
+          runtime_class: ""
+        K8sNcclWorkload:
+          min_bus_bw_gbps: 1
+          timeout: 600
+        K8sGpuStressWorkload:
+          memory_gb: 1
+          runtime: 30
+          timeout: 300
+          runtime_class_name: ""
+        K8sMigConfigCheck:
+          require_mig: false
+        K8sCrdWebhookCheck:
+          wait_timeout: 300
+
+    k8s_workloads:
+      checks:
+        K8sGpuStressWorkload:
+          runtime_class_name: ""
+
+  exclude:
+    tests: []
