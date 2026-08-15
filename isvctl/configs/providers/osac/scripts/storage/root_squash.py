@@ -21,6 +21,9 @@ server, and that the setting takes effect: root writes from a client pod
 are squashed to anonymous UID when enabled, and retained as UID 0 when
 disabled.
 
+Uses a PV/PVC with NFSv3 to mount /exports directly (NFSv4 can't mount
+it separately because both / and /exports share fsid=0 in the NFS server).
+
 Covers HSS13-01.
 
 Output JSON:
@@ -52,10 +55,12 @@ KUBECTL = os.environ.get("KUBECTL", "kubectl")
 NFS_SERVER_NS = os.environ.get("NFS_SERVER_NS", "nfs-system")
 NFS_SERVER_DEPLOY = os.environ.get("NFS_SERVER_DEPLOY", "deployment/nfs-server")
 NFS_SERVER_LABEL = os.environ.get("NFS_SERVER_LABEL", "app=nfs-server")
-NFS_MOUNT_PATH = "/"
-NFS_TEST_DIR = "rootsquash-test"
+NFS_EXPORT_PATH = os.environ.get("NFS_EXPORT_PATH", "/exports")
 TEST_NS = "isvtest-rootsquash"
 POD_TIMEOUT = 120
+
+PV_NAME = "rootsquash-nfs-pv"
+PVC_NAME = "rootsquash-nfs-pvc"
 
 
 def run_kubectl(*args: str, stdin: str | None = None, timeout: int = 60) -> tuple[int, str, str]:
@@ -67,6 +72,16 @@ def run_kubectl(*args: str, stdin: str | None = None, timeout: int = 60) -> tupl
         return 1, "", f"kubectl timed out after {timeout}s"
     except Exception as exc:
         return 1, "", str(exc)
+
+
+def get_nfs_pod_ip() -> str | None:
+    rc, ip, _ = run_kubectl(
+        "get", "pod", "-n", NFS_SERVER_NS, "-l", NFS_SERVER_LABEL,
+        "-o", "jsonpath={.items[0].status.podIP}",
+    )
+    if rc == 0 and ip:
+        return ip
+    return None
 
 
 def ensure_namespace() -> bool:
@@ -84,8 +99,44 @@ def ensure_namespace() -> bool:
     return True
 
 
+def create_nfs_pv_pvc(nfs_ip: str) -> bool:
+    pv = json.dumps({
+        "apiVersion": "v1",
+        "kind": "PersistentVolume",
+        "metadata": {"name": PV_NAME},
+        "spec": {
+            "capacity": {"storage": "1Gi"},
+            "accessModes": ["ReadWriteMany"],
+            "mountOptions": ["nfsvers=3"],
+            "nfs": {"server": nfs_ip, "path": NFS_EXPORT_PATH},
+        },
+    })
+    pvc = json.dumps({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": PVC_NAME, "namespace": TEST_NS},
+        "spec": {
+            "accessModes": ["ReadWriteMany"],
+            "storageClassName": "",
+            "volumeName": PV_NAME,
+            "resources": {"requests": {"storage": "1Gi"}},
+        },
+    })
+    rc, _, err = run_kubectl("apply", "-f", "-", stdin=pv)
+    if rc != 0:
+        return False
+    rc, _, err = run_kubectl("apply", "-f", "-", stdin=pvc)
+    return rc == 0
+
+
+def cleanup_pv_pvc() -> None:
+    run_kubectl("delete", "pvc", PVC_NAME, "-n", TEST_NS, "--ignore-not-found", timeout=30)
+    run_kubectl("delete", "pv", PV_NAME, "--ignore-not-found", timeout=30)
+
+
 def cleanup_namespace() -> None:
     run_kubectl("delete", "namespace", TEST_NS, "--ignore-not-found", "--wait=false", timeout=30)
+    cleanup_pv_pvc()
 
 
 def nfs_exec(*cmd_parts: str, timeout: int = 30) -> tuple[int, str, str]:
@@ -95,20 +146,10 @@ def nfs_exec(*cmd_parts: str, timeout: int = 30) -> tuple[int, str, str]:
     )
 
 
-def get_nfs_pod_ip() -> str | None:
-    rc, ip, _ = run_kubectl(
-        "get", "pod", "-n", NFS_SERVER_NS, "-l", NFS_SERVER_LABEL,
-        "-o", "jsonpath={.items[0].status.podIP}",
-    )
-    if rc == 0 and ip:
-        return ip
-    return None
-
-
 def toggle_root_squash(enable: bool) -> tuple[bool, str]:
     squash_opt = "root_squash" if enable else "no_root_squash"
-    unexport_cmd = f"exportfs -u '*:{NFS_MOUNT_PATH}'"
-    reexport_cmd = f"exportfs -o rw,fsid=0,insecure,{squash_opt} '*:{NFS_MOUNT_PATH}'"
+    unexport_cmd = f"exportfs -u '*:{NFS_EXPORT_PATH}'"
+    reexport_cmd = f"exportfs -o rw,fsid=0,insecure,{squash_opt} '*:{NFS_EXPORT_PATH}'"
     rc, _, err = nfs_exec("sh", "-c", f"{unexport_cmd} && {reexport_cmd}")
     if rc != 0:
         return False, f"exportfs toggle failed: {err}"
@@ -116,14 +157,13 @@ def toggle_root_squash(enable: bool) -> tuple[bool, str]:
     if rc != 0:
         return False, "exportfs -v failed"
     for line in out.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(NFS_MOUNT_PATH) and not stripped.startswith("/exports"):
+        if NFS_EXPORT_PATH in line:
             if squash_opt in line:
-                return True, f"{NFS_MOUNT_PATH} now exported with {squash_opt}"
-    return False, f"{NFS_MOUNT_PATH} export not found with '{squash_opt}' after toggle"
+                return True, f"{NFS_EXPORT_PATH} now exported with {squash_opt}"
+    return False, f"{NFS_EXPORT_PATH} export not found with '{squash_opt}' after toggle"
 
 
-def write_file_as_root(filename: str, nfs_server_ip: str) -> tuple[bool, str]:
+def write_file_as_root(filename: str) -> tuple[bool, str]:
     pod_name = f"rootsquash-{uuid.uuid4().hex[:8]}"
     manifest = json.dumps({
         "apiVersion": "v1",
@@ -135,17 +175,13 @@ def write_file_as_root(filename: str, nfs_server_ip: str) -> tuple[bool, str]:
             "containers": [{
                 "name": "writer",
                 "image": "busybox:1.36",
-                "command": [
-                    "sh", "-c",
-                    f"mkdir -p /mnt/{NFS_TEST_DIR} && "
-                    f"touch /mnt/{NFS_TEST_DIR}/{filename} && echo done",
-                ],
+                "command": ["sh", "-c", f"touch /mnt/{filename} && echo done"],
                 "volumeMounts": [{"name": "nfs", "mountPath": "/mnt"}],
                 "securityContext": {"runAsUser": 0},
             }],
             "volumes": [{
                 "name": "nfs",
-                "nfs": {"server": nfs_server_ip, "path": NFS_MOUNT_PATH},
+                "persistentVolumeClaim": {"claimName": PVC_NAME},
             }],
         },
     })
@@ -185,7 +221,7 @@ def write_file_as_root(filename: str, nfs_server_ip: str) -> tuple[bool, str]:
 
 
 def check_file_uid(filename: str) -> tuple[bool, int, str]:
-    filepath = f"/{NFS_TEST_DIR}/{filename}"
+    filepath = f"{NFS_EXPORT_PATH}/{filename}"
     rc, out, err = nfs_exec("stat", "-c", "%u", filepath)
     if rc != 0:
         return False, -1, f"stat failed: {err}"
@@ -198,8 +234,7 @@ def check_file_uid(filename: str) -> tuple[bool, int, str]:
 
 def cleanup_test_files(*filenames: str) -> None:
     for f in filenames:
-        nfs_exec("rm", "-f", f"/{NFS_TEST_DIR}/{f}")
-    nfs_exec("rmdir", f"/{NFS_TEST_DIR}")
+        nfs_exec("rm", "-f", f"{NFS_EXPORT_PATH}/{f}")
 
 
 def main() -> int:
@@ -233,6 +268,26 @@ def main() -> int:
             print(json.dumps(result, indent=2))
             return 0
 
+        if not create_nfs_pv_pvc(nfs_ip):
+            result["error"] = "could not create NFS PV/PVC"
+            print(json.dumps(result, indent=2))
+            return 0
+
+        # Wait for PVC to bind
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            rc, phase, _ = run_kubectl(
+                "get", "pvc", PVC_NAME, "-n", TEST_NS,
+                "-o", "jsonpath={.status.phase}",
+            )
+            if phase == "Bound":
+                break
+            time.sleep(2)
+        else:
+            result["error"] = f"PVC did not bind (phase={phase})"
+            print(json.dumps(result, indent=2))
+            return 0
+
         # --- 1. Enable root_squash ---
         ok, msg = toggle_root_squash(enable=True)
         result["tests"]["enable_root_squash"] = {"passed": ok, "message": msg}
@@ -241,7 +296,7 @@ def main() -> int:
             return 0
 
         # --- 2. Verify root is squashed ---
-        ok, msg = write_file_as_root(squash_file, nfs_ip)
+        ok, msg = write_file_as_root(squash_file)
         if not ok:
             result["tests"]["root_squashed"] = {"passed": False, "message": msg}
         else:
@@ -267,7 +322,7 @@ def main() -> int:
             return 0
 
         # --- 4. Verify root is NOT squashed ---
-        ok, msg = write_file_as_root(unsquash_file, nfs_ip)
+        ok, msg = write_file_as_root(unsquash_file)
         if not ok:
             result["tests"]["root_unsquashed"] = {"passed": False, "message": msg}
         else:
