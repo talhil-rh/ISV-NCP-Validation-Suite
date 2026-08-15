@@ -214,6 +214,19 @@ def disable_quotas() -> None:
     nfs_exec("sh", "-c", f"mount -o remount {NFS_EXPORT_PATH}", timeout=15)
 
 
+def ensure_test_users() -> None:
+    """Create test users on the NFS server for quota attribution."""
+    for uid, name in [(TEST_UID, "isvquota1"), (TEST_UID2, "isvquota2")]:
+        nfs_exec(
+            "sh", "-c",
+            f"id {uid} >/dev/null 2>&1 || useradd -u {uid} -M -s /bin/sh {name} 2>/dev/null || true",
+        )
+    nfs_exec(
+        "sh", "-c",
+        f"groupadd -g {TEST_GID} isvgrp1 2>/dev/null || true",
+    )
+
+
 def cleanup_test_files(tag: str) -> None:
     nfs_exec("rm", "-rf", f"{NFS_EXPORT_PATH}/homedir-test-{tag}")
     nfs_exec("rm", "-f", f"{NFS_EXPORT_PATH}/.ready-{CLIENT_POD_A}")
@@ -360,8 +373,11 @@ def main() -> int:
             print(json.dumps(result, indent=2))
             return 0
 
+        ensure_test_users()
+
         # --- filesystem_quota_configured ---
-        # Set 4MB hard limit for TEST_UID
+        # Set 4MB hard limit for TEST_UID, then write a small file AS that UID
+        # so repquota shows the entry (repquota only lists UIDs with usage or limits)
         rc, _, err = nfs_exec(
             "setquota", "-u", str(TEST_UID), "0", "4096", "0", "0", NFS_EXPORT_PATH,
         )
@@ -371,20 +387,28 @@ def main() -> int:
                 "message": f"setquota failed: {err}",
             }
         else:
-            rc, repq_out, _ = nfs_exec("repquota", "-u", NFS_EXPORT_PATH)
-            if rc == 0 and str(TEST_UID) in repq_out:
+            # Write a tiny file as TEST_UID so repquota shows the entry
+            nfs_exec(
+                "sh", "-c",
+                f"su -s /bin/sh isvquota1 -c '"
+                f"dd if=/dev/zero of={server_testdir}/quota-probe.dat bs=1K count=4 2>/dev/null"
+                f"'",
+                timeout=15,
+            )
+            rc, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
+            if rc == 0 and str(TEST_UID) in repq_out and "4096" in repq_out:
                 result["tests"]["filesystem_quota_configured"] = {
                     "passed": True,
-                    "message": f"quota configured for UID {TEST_UID}: 4MB hard limit",
+                    "message": f"quota configured for UID {TEST_UID}: 4MB hard limit, visible in repquota",
                 }
             else:
                 result["tests"]["filesystem_quota_configured"] = {
                     "passed": False,
-                    "message": f"quota set but not visible in repquota: {repq_out[:200]}",
+                    "message": f"quota set but not visible in repquota: {repq_out[:300]}",
                 }
 
         # --- filesystem_quota_updated ---
-        # Update to 8MB hard limit
+        # Update to 8MB hard limit and verify
         rc, _, err = nfs_exec(
             "setquota", "-u", str(TEST_UID), "0", "8192", "0", "0", NFS_EXPORT_PATH,
         )
@@ -403,87 +427,54 @@ def main() -> int:
             else:
                 result["tests"]["filesystem_quota_updated"] = {
                     "passed": False,
-                    "message": f"quota update not reflected in repquota: {repq_out[:200]}",
+                    "message": f"quota update not reflected in repquota: {repq_out[:300]}",
                 }
 
         # --- filesystem_quota_enforced ---
-        # Set tight 1MB hard limit, then try to write 2MB as TEST_UID
+        # Set tight 1MB hard limit, then try to write 2MB AS TEST_UID
+        nfs_exec("sh", "-c", f"rm -f {server_testdir}/quota-probe.dat")
         nfs_exec("setquota", "-u", str(TEST_UID), "0", "1024", "0", "0", NFS_EXPORT_PATH)
-        quota_file = f"{server_testdir}/quota-test.dat"
-        nfs_exec("sh", "-c", f"dd if=/dev/zero of={quota_file} bs=1K count=512 2>/dev/null")
-        nfs_exec("chown", f"{TEST_UID}:{TEST_UID}", quota_file)
 
-        rc, _, err = nfs_exec(
+        rc, dd_out, dd_err = nfs_exec(
             "sh", "-c",
-            f"su -s /bin/sh -c 'dd if=/dev/zero of={server_testdir}/quota-exceed.dat bs=1K count=2048 2>&1' "
-            f"$(getent passwd {TEST_UID} | cut -d: -f1 || echo nobody) 2>&1",
-            timeout=15,
+            f"su -s /bin/sh isvquota1 -c '"
+            f"dd if=/dev/zero of={server_testdir}/quota-exceed.dat bs=1K count=2048 2>&1"
+            f"'",
+            timeout=30,
         )
-        # The user may not exist — use direct chown approach instead
-        nfs_exec("rm", "-f", f"{server_testdir}/quota-exceed.dat")
-        nfs_exec(
-            "sh", "-c",
-            f"dd if=/dev/zero of={server_testdir}/quota-exceed.dat bs=1K count=2048 2>/dev/null; "
-            f"chown {TEST_UID}:{TEST_UID} {server_testdir}/quota-exceed.dat 2>/dev/null",
-            timeout=15,
-        )
+        # dd should fail or produce a short write when quota is exceeded
+        combined = f"{dd_out} {dd_err}".lower()
+        quota_hit = "quota" in combined or "no space" in combined or "exceeded" in combined
 
-        # Check if usage is capped near the limit
-        rc, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
-        enforced = False
-        if rc == 0:
-            for line in repq_out.splitlines():
-                if str(TEST_UID) in line and ("*" in line or "+" in line):
-                    enforced = True
-                    break
-            if not enforced:
-                # Alternative: check if the file is smaller than requested
-                rc2, size_out, _ = nfs_exec("stat", "-c", "%s", f"{server_testdir}/quota-exceed.dat")
-                if rc2 == 0:
-                    try:
-                        size = int(size_out)
-                        if size < 2048 * 1024:
-                            enforced = True
-                    except ValueError:
-                        pass
+        if not quota_hit:
+            # Check file size — should be < 2MB if enforcement worked
+            rc2, size_out, _ = nfs_exec("stat", "-c", "%s", f"{server_testdir}/quota-exceed.dat")
+            if rc2 == 0:
+                try:
+                    size = int(size_out)
+                    if size < 2048 * 1024:
+                        quota_hit = True
+                except ValueError:
+                    pass
 
-        # Even if chown-based enforcement is tricky, check via client write
-        if not enforced:
-            # Write as TEST_UID from the client pod
-            pod_exec(
-                CLIENT_POD_A, "sh", "-c",
-                f"adduser -u {TEST_UID} testquota 2>/dev/null; "
-                f"su -s /bin/sh testquota -c '"
-                f"dd if=/dev/zero of=/mnt/{testdir}/client-quota.dat bs=1K count=2048 2>&1"
-                f"'",
-                timeout=30,
-            )
-            rc, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
-            if rc == 0:
+        if not quota_hit:
+            # Check repquota for over-limit marker
+            rc3, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
+            if rc3 == 0:
                 for line in repq_out.splitlines():
-                    if str(TEST_UID) in line:
-                        parts = line.split()
-                        for p in parts:
-                            if p in ("+-", "-+", "*"):
-                                enforced = True
-                                break
-                        # Check if usage is near limit
-                        try:
-                            usage_parts = [int(x) for x in parts if x.isdigit()]
-                            if len(usage_parts) >= 2 and usage_parts[0] >= 900:
-                                enforced = True
-                        except (ValueError, IndexError):
-                            pass
+                    if str(TEST_UID) in line and ("+" in line or "*" in line):
+                        quota_hit = True
+                        break
 
-        if enforced:
+        if quota_hit:
             result["tests"]["filesystem_quota_enforced"] = {
                 "passed": True,
-                "message": f"quota enforcement verified: writes by UID {TEST_UID} capped at 1MB limit",
+                "message": f"quota enforcement verified: writes by UID {TEST_UID} capped at 1MB hard limit",
             }
         else:
             result["tests"]["filesystem_quota_enforced"] = {
                 "passed": False,
-                "message": "quota enforcement could not be verified",
+                "message": f"quota enforcement not detected: dd_out={dd_out[:200]} dd_err={dd_err[:200]}",
             }
 
         # ═══ Usage accounting tests (DIR01-02) ═══
@@ -493,98 +484,125 @@ def main() -> int:
         nfs_exec("setquota", "-u", str(TEST_UID2), "0", "102400", "0", "0", NFS_EXPORT_PATH)
         nfs_exec("setquota", "-g", str(TEST_GID), "0", "102400", "0", "0", NFS_EXPORT_PATH)
 
-        # Clean slate for accounting
-        nfs_exec("rm", "-rf", f"{server_testdir}/uid-test")
-        nfs_exec("rm", "-rf", f"{server_testdir}/gid-test")
+        # Clean up any previous test files for this UID
+        nfs_exec("sh", "-c", f"rm -rf {server_testdir}/uid-test {server_testdir}/gid-test {server_testdir}/quota-exceed.dat")
         nfs_exec("mkdir", "-p", f"{server_testdir}/uid-test", f"{server_testdir}/gid-test")
         nfs_exec("chmod", "1777", f"{server_testdir}/uid-test", f"{server_testdir}/gid-test")
 
         # --- uid_usage_accounted ---
+        # Write file AS TEST_UID so block allocation is attributed correctly
         nfs_exec(
             "sh", "-c",
-            f"dd if=/dev/zero of={server_testdir}/uid-test/file1.dat bs=1K count=512 2>/dev/null && "
-            f"chown {TEST_UID}:0 {server_testdir}/uid-test/file1.dat",
+            f"su -s /bin/sh isvquota1 -c '"
+            f"dd if=/dev/zero of={server_testdir}/uid-test/file1.dat bs=1K count=512 2>/dev/null"
+            f"'",
+            timeout=15,
         )
-        rc, repq_out, _ = nfs_exec("repquota", "-u", NFS_EXPORT_PATH)
+        rc, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
         uid_found = False
+        uid1_usage = 0
         if rc == 0:
             for line in repq_out.splitlines():
                 if str(TEST_UID) in line:
                     parts = line.split()
-                    numeric_parts = [p for p in parts if p.isdigit()]
-                    if numeric_parts and int(numeric_parts[0]) > 0:
-                        uid_found = True
+                    for p in parts:
+                        try:
+                            val = int(p)
+                            if val > 0:
+                                uid_found = True
+                                uid1_usage = val
+                                break
+                        except ValueError:
+                            continue
                     break
         if uid_found:
             result["tests"]["uid_usage_accounted"] = {
                 "passed": True,
-                "message": f"storage usage for UID {TEST_UID} tracked in quota accounting",
+                "message": f"storage usage for UID {TEST_UID} tracked: {uid1_usage}K in quota accounting",
             }
         else:
             result["tests"]["uid_usage_accounted"] = {
                 "passed": False,
-                "message": f"UID {TEST_UID} usage not found in repquota output",
+                "message": f"UID {TEST_UID} usage not found in repquota: {repq_out[:300]}",
             }
 
         # --- gid_usage_accounted ---
+        # Write file with TEST_GID as primary group
         nfs_exec(
             "sh", "-c",
-            f"dd if=/dev/zero of={server_testdir}/gid-test/file1.dat bs=1K count=512 2>/dev/null && "
-            f"chown 0:{TEST_GID} {server_testdir}/gid-test/file1.dat",
+            f"sg isvgrp1 -c '"
+            f"dd if=/dev/zero of={server_testdir}/gid-test/file1.dat bs=1K count=512 2>/dev/null"
+            f"' 2>/dev/null || "
+            f"su -s /bin/sh isvquota1 -c '"
+            f"dd if=/dev/zero of={server_testdir}/gid-test/file1.dat bs=1K count=512 2>/dev/null"
+            f"';"
+            f"chgrp {TEST_GID} {server_testdir}/gid-test/file1.dat 2>/dev/null",
+            timeout=15,
         )
-        rc, repq_out, _ = nfs_exec("repquota", "-g", NFS_EXPORT_PATH)
+        rc, repq_out, _ = nfs_exec("repquota", "-gp", NFS_EXPORT_PATH)
         gid_found = False
+        gid_usage = 0
         if rc == 0:
             for line in repq_out.splitlines():
                 if str(TEST_GID) in line:
                     parts = line.split()
-                    numeric_parts = [p for p in parts if p.isdigit()]
-                    if numeric_parts and int(numeric_parts[0]) > 0:
-                        gid_found = True
+                    for p in parts:
+                        try:
+                            val = int(p)
+                            if val > 0:
+                                gid_found = True
+                                gid_usage = val
+                                break
+                        except ValueError:
+                            continue
                     break
         if gid_found:
             result["tests"]["gid_usage_accounted"] = {
                 "passed": True,
-                "message": f"storage usage for GID {TEST_GID} tracked in quota accounting",
+                "message": f"storage usage for GID {TEST_GID} tracked: {gid_usage}K in quota accounting",
             }
         else:
             result["tests"]["gid_usage_accounted"] = {
                 "passed": False,
-                "message": f"GID {TEST_GID} usage not found in repquota output",
+                "message": f"GID {TEST_GID} usage not found in repquota: {repq_out[:300]}",
             }
 
         # --- identity_usage_isolated ---
+        # Write file AS TEST_UID2 (different UID) and verify separate tracking
         nfs_exec(
             "sh", "-c",
-            f"dd if=/dev/zero of={server_testdir}/uid-test/file2.dat bs=1K count=512 2>/dev/null && "
-            f"chown {TEST_UID2}:0 {server_testdir}/uid-test/file2.dat",
+            f"su -s /bin/sh isvquota2 -c '"
+            f"dd if=/dev/zero of={server_testdir}/uid-test/file2.dat bs=1K count=256 2>/dev/null"
+            f"'",
+            timeout=15,
         )
-        rc, repq_out, _ = nfs_exec("repquota", "-u", NFS_EXPORT_PATH)
+        rc, repq_out, _ = nfs_exec("repquota", "-up", NFS_EXPORT_PATH)
         uid1_usage = 0
         uid2_usage = 0
         if rc == 0:
             for line in repq_out.splitlines():
-                parts = line.split()
-                if not parts:
-                    continue
-                if parts[0] == f"#{TEST_UID}" or (len(parts) > 1 and str(TEST_UID) in parts[0]):
-                    numeric_parts = [p for p in parts if p.isdigit()]
-                    if numeric_parts:
-                        uid1_usage = int(numeric_parts[0])
-                elif parts[0] == f"#{TEST_UID2}" or (len(parts) > 1 and str(TEST_UID2) in parts[0]):
-                    numeric_parts = [p for p in parts if p.isdigit()]
-                    if numeric_parts:
-                        uid2_usage = int(numeric_parts[0])
+                if str(TEST_UID) in line and str(TEST_UID2) not in line:
+                    parts = line.split()
+                    for p in parts:
+                        try:
+                            val = int(p)
+                            if val > 0:
+                                uid1_usage = val
+                                break
+                        except ValueError:
+                            continue
+                elif str(TEST_UID2) in line:
+                    parts = line.split()
+                    for p in parts:
+                        try:
+                            val = int(p)
+                            if val > 0:
+                                uid2_usage = val
+                                break
+                        except ValueError:
+                            continue
 
-        if uid1_usage > 0 and uid2_usage > 0 and uid1_usage != uid2_usage:
-            result["tests"]["identity_usage_isolated"] = {
-                "passed": True,
-                "message": (
-                    f"usage isolated: UID {TEST_UID}={uid1_usage}K, "
-                    f"UID {TEST_UID2}={uid2_usage}K (independently tracked)"
-                ),
-            }
-        elif uid1_usage > 0 and uid2_usage > 0:
+        if uid1_usage > 0 and uid2_usage > 0:
             result["tests"]["identity_usage_isolated"] = {
                 "passed": True,
                 "message": (

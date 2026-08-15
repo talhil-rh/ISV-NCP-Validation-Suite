@@ -273,12 +273,14 @@ def main() -> int:
         # --- 4. Contention: hold exclusive, try another exclusive ---
         rc, out, err = pod_exec(
             "sh", "-c",
-            f"flock -x {lockfile} sh -c 'touch /mnt/.flock-holder && sleep 30' & "
-            "sleep 2 && test -f /mnt/.flock-holder && "
+            f"flock -x {lockfile} sh -c 'touch /mnt/.flock-holder; sleep 10' & "
+            "BGPID=$!; "
+            "for i in $(seq 1 20); do test -f /mnt/.flock-holder && break; sleep 0.5; done; "
             f"flock -x -w 2 {lockfile} echo CONTENTION_FAIL 2>/dev/null; "
-            "RESULT=$?; "
-            'if [ "$RESULT" -ne 0 ]; then echo CONTENTION_ENFORCED; else echo CONTENTION_NOT_ENFORCED; fi',
-            timeout=30,
+            "RC=$?; "
+            "kill $BGPID 2>/dev/null; wait $BGPID 2>/dev/null; "
+            'if [ "$RC" -ne 0 ]; then echo CONTENTION_ENFORCED; else echo CONTENTION_NOT_ENFORCED; fi',
+            timeout=45,
         )
         if "CONTENTION_ENFORCED" in out:
             result["tests"]["flock_contention"] = {
