@@ -53,6 +53,7 @@ NFS_SERVER_NS = os.environ.get("NFS_SERVER_NS", "nfs-system")
 NFS_SERVER_DEPLOY = os.environ.get("NFS_SERVER_DEPLOY", "deployment/nfs-server")
 NFS_EXPORT_PATH = os.environ.get("NFS_EXPORT_PATH", "/exports")
 NFS_SERVER_SVC = os.environ.get("NFS_SERVER_SVC", "nfs-server.nfs-system.svc.cluster.local")
+NFS_SVC_NAME = os.environ.get("NFS_SVC_NAME", "nfs-server")
 TEST_NS = "isvtest-rootsquash"
 POD_TIMEOUT = 120
 
@@ -115,7 +116,18 @@ def toggle_root_squash(enable: bool) -> tuple[bool, str]:
     return False, f"{NFS_EXPORT_PATH} export not found with '{squash_opt}' after toggle"
 
 
-def write_file_as_root(filename: str) -> tuple[bool, str]:
+def resolve_nfs_server() -> str:
+    """Resolve NFS server to ClusterIP — node DNS can't resolve svc.cluster.local."""
+    rc, ip, _ = run_kubectl(
+        "get", "svc", NFS_SVC_NAME, "-n", NFS_SERVER_NS,
+        "-o", "jsonpath={.spec.clusterIP}",
+    )
+    if rc == 0 and ip:
+        return ip
+    return NFS_SERVER_SVC
+
+
+def write_file_as_root(filename: str, nfs_server_ip: str) -> tuple[bool, str]:
     """Create a pod that mounts NFS directly and writes a file as UID 0."""
     pod_name = f"rootsquash-{uuid.uuid4().hex[:8]}"
     manifest = json.dumps({
@@ -134,7 +146,7 @@ def write_file_as_root(filename: str) -> tuple[bool, str]:
             }],
             "volumes": [{
                 "name": "nfs",
-                "nfs": {"server": NFS_SERVER_SVC, "path": NFS_EXPORT_PATH},
+                "nfs": {"server": nfs_server_ip, "path": NFS_EXPORT_PATH},
             }],
         },
     })
@@ -223,6 +235,7 @@ def main() -> int:
 
     try:
         ensure_namespace()
+        nfs_ip = resolve_nfs_server()
 
         # --- 1. Enable root_squash ---
         ok, msg = toggle_root_squash(enable=True)
@@ -232,7 +245,7 @@ def main() -> int:
             return 0
 
         # --- 2. Verify root is squashed ---
-        ok, msg = write_file_as_root(squash_file)
+        ok, msg = write_file_as_root(squash_file, nfs_ip)
         if not ok:
             result["tests"]["root_squashed"] = {"passed": False, "message": msg}
         else:
@@ -258,7 +271,7 @@ def main() -> int:
             return 0
 
         # --- 4. Verify root is NOT squashed ---
-        ok, msg = write_file_as_root(unsquash_file)
+        ok, msg = write_file_as_root(unsquash_file, nfs_ip)
         if not ok:
             result["tests"]["root_unsquashed"] = {"passed": False, "message": msg}
         else:
