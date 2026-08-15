@@ -89,10 +89,17 @@ def nfs_exec(*cmd_parts: str, timeout: int = 30) -> tuple[int, str, str]:
 
 
 def toggle_root_squash(enable: bool) -> tuple[bool, str]:
+    export_path = NFS_EXPORT_PATH.replace("/", r"\/")
     if enable:
-        sed_cmd = "sed -i 's/no_root_squash/root_squash/g' /etc/exports && exportfs -ra"
+        sed_cmd = (
+            f"sed -i '/^{export_path}/s/no_root_squash/root_squash/g' /etc/exports"
+            " && exportfs -ra"
+        )
     else:
-        sed_cmd = r"sed -i 's/\broot_squash\b/no_root_squash/g' /etc/exports && exportfs -ra"
+        sed_cmd = (
+            f"sed -i '/^{export_path}/s/\\broot_squash\\b/no_root_squash/g' /etc/exports"
+            " && exportfs -ra"
+        )
     rc, _, err = nfs_exec("sh", "-c", sed_cmd)
     if rc != 0:
         return False, f"sed/exportfs failed: {err}"
