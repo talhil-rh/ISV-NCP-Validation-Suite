@@ -89,27 +89,22 @@ def nfs_exec(*cmd_parts: str, timeout: int = 30) -> tuple[int, str, str]:
 
 
 def toggle_root_squash(enable: bool) -> tuple[bool, str]:
-    export_path = NFS_EXPORT_PATH.replace("/", r"\/")
-    if enable:
-        sed_cmd = (
-            f"sed -i '/^{export_path}/s/no_root_squash/root_squash/g' /etc/exports"
-            " && exportfs -ra"
-        )
-    else:
-        sed_cmd = (
-            f"sed -i '/^{export_path}/s/\\broot_squash\\b/no_root_squash/g' /etc/exports"
-            " && exportfs -ra"
-        )
-    rc, _, err = nfs_exec("sh", "-c", sed_cmd)
+    squash_opt = "root_squash" if enable else "no_root_squash"
+    # Unexport and re-export just the target path to avoid touching other entries
+    unexport_cmd = f"exportfs -u '*:{NFS_EXPORT_PATH}'"
+    reexport_cmd = f"exportfs -o rw,fsid=0,insecure,{squash_opt} '*:{NFS_EXPORT_PATH}'"
+    rc, _, err = nfs_exec("sh", "-c", f"{unexport_cmd} && {reexport_cmd}")
     if rc != 0:
-        return False, f"sed/exportfs failed: {err}"
+        return False, f"exportfs toggle failed: {err}"
     rc, out, _ = nfs_exec("exportfs", "-v")
     if rc != 0:
         return False, "exportfs -v failed"
-    keyword = "root_squash" if enable else "no_root_squash"
-    if keyword not in out:
-        return False, f"exports do not contain '{keyword}' after toggle"
-    return True, f"exports now contain '{keyword}'"
+    # Verify the target export line contains the expected option
+    for line in out.splitlines():
+        if NFS_EXPORT_PATH in line:
+            if squash_opt in line:
+                return True, f"{NFS_EXPORT_PATH} now exported with {squash_opt}"
+    return False, f"{NFS_EXPORT_PATH} export not found with '{squash_opt}' after toggle"
 
 
 def write_file_as_root(filename: str) -> tuple[bool, str]:
