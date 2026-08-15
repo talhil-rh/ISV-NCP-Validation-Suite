@@ -21,9 +21,10 @@ server, and that the setting takes effect: root writes from a client pod
 are squashed to anonymous UID when enabled, and retained as UID 0 when
 disabled.
 
-Uses a privileged pod that mounts NFS internally (not via kubelet volume
-mounts) to avoid NFSv4 pseudo-root fsid conflicts and ClusterIP routing
-issues from nodes.
+Uses a privileged pod that mounts NFS internally via NFSv4 to the
+pseudo-root (/exports on the server, exported as / with fsid=0).
+A single pod is kept running for both tests to avoid repeated
+nfs-utils install overhead.
 
 Covers HSS13-01.
 
@@ -58,7 +59,8 @@ NFS_SERVER_DEPLOY = os.environ.get("NFS_SERVER_DEPLOY", "deployment/nfs-server")
 NFS_SERVER_LABEL = os.environ.get("NFS_SERVER_LABEL", "app=nfs-server")
 NFS_EXPORT_PATH = os.environ.get("NFS_EXPORT_PATH", "/exports")
 TEST_NS = "isvtest-rootsquash"
-POD_TIMEOUT = 120
+CLIENT_POD = "rootsquash-client"
+SETUP_TIMEOUT = 180
 
 
 def run_kubectl(*args: str, stdin: str | None = None, timeout: int = 60) -> tuple[int, str, str]:
@@ -108,6 +110,64 @@ def nfs_exec(*cmd_parts: str, timeout: int = 30) -> tuple[int, str, str]:
     )
 
 
+def create_client_pod(nfs_ip: str) -> tuple[bool, str]:
+    """Create a privileged pod that installs nfs-utils, mounts NFS, then sleeps."""
+    manifest = json.dumps({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": CLIENT_POD, "namespace": TEST_NS},
+        "spec": {
+            "restartPolicy": "Never",
+            "containers": [{
+                "name": "client",
+                "image": "fedora:latest",
+                "command": [
+                    "sh", "-c",
+                    "dnf install -y nfs-utils > /dev/null 2>&1 && "
+                    f"mount -t nfs4 {nfs_ip}:/ /mnt && "
+                    "touch /mnt/.ready && "
+                    "sleep 600",
+                ],
+                "securityContext": {"privileged": True, "runAsUser": 0},
+            }],
+        },
+    })
+    rc, _, err = run_kubectl("apply", "-f", "-", stdin=manifest)
+    if rc != 0:
+        return False, f"pod apply failed: {err}"
+
+    deadline = time.time() + SETUP_TIMEOUT
+    while time.time() < deadline:
+        rc, phase, _ = run_kubectl(
+            "get", "pod", CLIENT_POD, "-n", TEST_NS,
+            "-o", "jsonpath={.status.phase}",
+        )
+        if phase == "Failed":
+            _, logs, _ = run_kubectl("logs", CLIENT_POD, "-n", TEST_NS)
+            return False, f"pod failed: {logs}"
+        if phase == "Running":
+            rc2, _, _ = run_kubectl(
+                "exec", CLIENT_POD, "-n", TEST_NS, "--",
+                "test", "-f", "/mnt/.ready",
+            )
+            if rc2 == 0:
+                return True, "client pod ready with NFS mounted"
+        time.sleep(3)
+    return False, "client pod setup timed out"
+
+
+def client_touch(filename: str) -> tuple[bool, str]:
+    """Create a file on NFS via the client pod."""
+    rc, _, err = run_kubectl(
+        "exec", CLIENT_POD, "-n", TEST_NS, "--",
+        "touch", f"/mnt/{filename}",
+        timeout=15,
+    )
+    if rc != 0:
+        return False, f"touch failed: {err}"
+    return True, ""
+
+
 def toggle_root_squash(enable: bool) -> tuple[bool, str]:
     squash_opt = "root_squash" if enable else "no_root_squash"
     unexport_cmd = f"exportfs -u '*:{NFS_EXPORT_PATH}'"
@@ -125,68 +185,6 @@ def toggle_root_squash(enable: bool) -> tuple[bool, str]:
     return False, f"{NFS_EXPORT_PATH} export not found with '{squash_opt}' after toggle"
 
 
-def write_file_as_root(filename: str, nfs_ip: str) -> tuple[bool, str]:
-    """Run a privileged pod that mounts NFS internally and creates a file as root."""
-    pod_name = f"rootsquash-{uuid.uuid4().hex[:8]}"
-    script = (
-        f"mount -t nfs -o nfsvers=3 {nfs_ip}:{NFS_EXPORT_PATH} /mnt && "
-        f"touch /mnt/{filename} && "
-        f"umount /mnt && "
-        f"echo done"
-    )
-    manifest = json.dumps({
-        "apiVersion": "v1",
-        "kind": "Pod",
-        "metadata": {"name": pod_name, "namespace": TEST_NS},
-        "spec": {
-            "restartPolicy": "Never",
-            "containers": [{
-                "name": "writer",
-                "image": "registry.access.redhat.com/ubi9/ubi-minimal:latest",
-                "command": ["sh", "-c",
-                            "microdnf install -y nfs-utils > /dev/null 2>&1 && " + script],
-                "securityContext": {
-                    "privileged": True,
-                    "runAsUser": 0,
-                },
-            }],
-        },
-    })
-
-    rc, _, err = run_kubectl("apply", "-f", "-", stdin=manifest)
-    if rc != 0:
-        return False, f"pod apply failed: {err}"
-
-    deadline = time.time() + POD_TIMEOUT
-    while time.time() < deadline:
-        rc, phase, _ = run_kubectl(
-            "get", "pod", pod_name, "-n", TEST_NS,
-            "-o", "jsonpath={.status.phase}",
-        )
-        if phase in ("Succeeded", "Failed"):
-            break
-        time.sleep(3)
-    else:
-        _, events, _ = run_kubectl(
-            "get", "events", "-n", TEST_NS,
-            "--field-selector", f"involvedObject.name={pod_name}",
-            "--sort-by=.lastTimestamp", timeout=10,
-        )
-        run_kubectl("delete", "pod", pod_name, "-n", TEST_NS, "--force", timeout=15)
-        diag = "pod timed out"
-        if events:
-            last_lines = "\n".join(events.strip().splitlines()[-3:])
-            diag += f"\nevents:\n{last_lines}"
-        return False, diag
-
-    _, logs, _ = run_kubectl("logs", pod_name, "-n", TEST_NS)
-    run_kubectl("delete", "pod", pod_name, "-n", TEST_NS, "--force", timeout=15)
-
-    if phase == "Failed":
-        return False, f"pod failed: {logs}"
-    return True, logs
-
-
 def check_file_uid(filename: str) -> tuple[bool, int, str]:
     filepath = f"{NFS_EXPORT_PATH}/{filename}"
     rc, out, err = nfs_exec("stat", "-c", "%u", filepath)
@@ -202,6 +200,7 @@ def check_file_uid(filename: str) -> tuple[bool, int, str]:
 def cleanup_test_files(*filenames: str) -> None:
     for f in filenames:
         nfs_exec("rm", "-f", f"{NFS_EXPORT_PATH}/{f}")
+    nfs_exec("rm", "-f", f"{NFS_EXPORT_PATH}/.ready")
 
 
 def main() -> int:
@@ -235,6 +234,12 @@ def main() -> int:
             print(json.dumps(result, indent=2))
             return 0
 
+        ok, msg = create_client_pod(nfs_ip)
+        if not ok:
+            result["error"] = msg
+            print(json.dumps(result, indent=2))
+            return 0
+
         # --- 1. Enable root_squash ---
         ok, msg = toggle_root_squash(enable=True)
         result["tests"]["enable_root_squash"] = {"passed": ok, "message": msg}
@@ -243,7 +248,7 @@ def main() -> int:
             return 0
 
         # --- 2. Verify root is squashed ---
-        ok, msg = write_file_as_root(squash_file, nfs_ip)
+        ok, msg = client_touch(squash_file)
         if not ok:
             result["tests"]["root_squashed"] = {"passed": False, "message": msg}
         else:
@@ -269,7 +274,7 @@ def main() -> int:
             return 0
 
         # --- 4. Verify root is NOT squashed ---
-        ok, msg = write_file_as_root(unsquash_file, nfs_ip)
+        ok, msg = client_touch(unsquash_file)
         if not ok:
             result["tests"]["root_unsquashed"] = {"passed": False, "message": msg}
         else:
