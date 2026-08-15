@@ -201,6 +201,7 @@ def cleanup_test_files(*filenames: str) -> None:
     for f in filenames:
         nfs_exec("rm", "-f", f"{NFS_EXPORT_PATH}/{f}")
     nfs_exec("rm", "-f", f"{NFS_EXPORT_PATH}/.ready")
+    nfs_exec("chmod", "755", NFS_EXPORT_PATH)
 
 
 def main() -> int:
@@ -239,6 +240,9 @@ def main() -> int:
             result["error"] = msg
             print(json.dumps(result, indent=2))
             return 0
+
+        # Make export writable so squashed nobody user can create files
+        nfs_exec("chmod", "1777", NFS_EXPORT_PATH)
 
         # --- 1. Enable root_squash ---
         ok, msg = toggle_root_squash(enable=True)
