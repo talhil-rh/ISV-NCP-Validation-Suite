@@ -45,7 +45,7 @@ commands:
       - name: root_squash
         phase: test
         command: "python3 ../scripts/storage/root_squash.py"
-        timeout: 300
+        timeout: 480
 
 tests:
   cluster_name: "osac-hss-storage-validation"

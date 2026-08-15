@@ -85,6 +85,21 @@ def get_nfs_pod_ip() -> str | None:
 
 
 def ensure_namespace() -> bool:
+    # Wait for any previous terminating namespace to be fully gone
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        rc, phase, _ = run_kubectl(
+            "get", "namespace", TEST_NS,
+            "-o", "jsonpath={.status.phase}",
+        )
+        if rc != 0:
+            break  # namespace doesn't exist — ready to create
+        if phase == "Terminating":
+            time.sleep(3)
+            continue
+        # Namespace exists and is Active — delete it first
+        run_kubectl("delete", "namespace", TEST_NS, "--wait=true", timeout=90)
+        break
     rc, ns_yaml, _ = run_kubectl("create", "namespace", TEST_NS, "--dry-run=client", "-o", "yaml")
     if rc != 0:
         return False
@@ -100,7 +115,7 @@ def ensure_namespace() -> bool:
 
 
 def cleanup_namespace() -> None:
-    run_kubectl("delete", "namespace", TEST_NS, "--ignore-not-found", "--wait=false", timeout=30)
+    run_kubectl("delete", "namespace", TEST_NS, "--ignore-not-found", "--wait=true", timeout=120)
 
 
 def nfs_exec(*cmd_parts: str, timeout: int = 30) -> tuple[int, str, str]:
