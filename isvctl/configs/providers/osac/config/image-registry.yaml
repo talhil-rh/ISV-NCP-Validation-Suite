@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OSAC Image Registry Validation Configuration
+#
+# Launches a VM from a golden image (DataImportCron) via OpenShift
+# Virtualization (CNV). Only the launch_instance step is wired;
+# other image-registry checks (CRUD, upload, BMaaS) skip as
+# step_not_configured.
+#
+# Implemented checks:
+#   BOOT01-05: VmBootedFromCustomImageCheck (VM from custom image reaches running)
+#
+# Usage:
+#   KUBECONFIG=/path/to/kubeconfig \
+#   ISVTEST_INCLUDE_UNRELEASED=1 \
+#   uv run isvctl test run -f isvctl/configs/providers/osac/config/image-registry.yaml
+
+import:
+  - ../../../suites/image-registry.yaml
+
+version: "1.0"
+
+commands:
+  image_registry:
+    phases: ["test", "teardown"]
+    steps:
+      - name: launch_instance
+        phase: test
+        command: "python3 ../scripts/image_registry/launch_custom_image_vm.py"
+        args:
+          - "--namespace"
+          - "isv-image-test"
+          - "--vm-name"
+          - "isv-custom-image-vm"
+          - "--container-image"
+          - "quay.io/containerdisks/fedora:latest"
+        timeout: 600
+
+      - name: teardown_instance
+        phase: teardown
+        command: "python3 ../scripts/image_registry/teardown_vm.py"
+        args:
+          - "--namespace"
+          - "isv-image-test"
+          - "--vm-name"
+          - "isv-custom-image-vm"
+        timeout: 120
+
+tests:
+  cluster_name: "osac-image-registry"
+  description: "OSAC image registry: VM from custom image via CNV"
+
+  settings:
+    region: "osac-default"
+
+  exclude:
+    labels:
+      - "ssh"
+      - "bare_metal"
