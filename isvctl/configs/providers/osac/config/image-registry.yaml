@@ -41,6 +41,15 @@ commands:
   image_registry:
     phases: ["setup", "test", "teardown"]
     steps:
+      - name: setup_namespaces
+        phase: setup
+        command: "python3 ../scripts/image_registry/setup_namespaces.py"
+        args:
+          - "--namespaces"
+          - "isv-image-crud-test"
+          - "isv-image-test"
+        timeout: 180
+
       - name: crud_image
         phase: test
         command: "python3 ../scripts/image_registry/crud_image.py"
