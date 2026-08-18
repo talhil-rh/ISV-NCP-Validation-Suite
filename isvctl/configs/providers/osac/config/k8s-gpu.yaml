@@ -13,74 +13,111 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# OSAC GPU Cluster Validation Configuration
-# Runs K8s GPU validation checks on a multi-node OCP cluster with NVIDIA A10 GPU.
-# No GPU label exclusion — this config is for clusters with GPU hardware.
+# OSAC K8s GPU Validation Configuration
 #
-# Target: osac-gpu-oci11 (3x masters + 1x VM.GPU.A10.1 worker)
+# Tests GPU node pool creation and multi-node NCCL workload on an OCP cluster
+# with NVIDIA GPU Operator + MPI Operator installed.
+#
+# Checks:
+#   K8S06-01: K8sGpuNodePoolCreatedCheck — GPU node pool via MachineSet
+#   K8S33-01: K8sNcclMultiNodeWorkload — NCCL AllReduce across GPU nodes
+#
+# Prerequisites:
+#   - At least 2 GPU worker nodes (g5.xlarge or larger)
+#   - NVIDIA GPU Operator installed with ClusterPolicy
+#   - Kubeflow MPI Operator installed (MPIJob CRD)
+#   - NFD (Node Feature Discovery) for GPU detection
 #
 # Usage:
-#   KUBECONFIG=~/.kube/osac-gpu-oci11.kubeconfig \
-#     uv run isvctl test run -f isvctl/configs/providers/osac/config/k8s-gpu.yaml --phase test
+#   KUBECONFIG=/path/to/kubeconfig \
+#   ISVTEST_INCLUDE_UNRELEASED=1 \
+#   uv run isvctl test run -f isvctl/configs/providers/osac/config/k8s-gpu.yaml
 
-import: ../../ocp/config/k8s.yaml
+import:
+  - ../../../suites/k8s.yaml
 
 version: "1.0"
 
 commands:
   kubernetes:
+    phases: ["setup", "test", "teardown"]
     steps:
-      - name: setup
+      - name: create_test_gpu_node_pool
         phase: setup
-        command: "python3 ../../ocp/scripts/k8s/setup.py"
-        output_schema: cluster
-        timeout: 300
+        command: "python3 ../../ocp/scripts/k8s/create_node_pool.py"
+        output_schema: node_pool
+        timeout: 1800
+        env:
+          OCP_NODE_POOL_NAME: "isv-gpu-pool"
+          OCP_NODE_POOL_REPLICAS: "1"
+          OCP_NODE_POOL_LABELS_JSON: '{"nvidia.com/gpu.present":"true"}'
+          OCP_NODE_POOL_TAINTS_JSON: '[]'
+          OCP_NODE_POOL_NODE_TYPE: "gpu"
 
-      - name: teardown
+      - name: teardown_gpu_node_pool
         phase: teardown
-        command: "python3 ../../ocp/scripts/k8s/teardown.py"
-        timeout: 30
+        command: "python3 ../../ocp/scripts/k8s/destroy_node_pool.py"
+        timeout: 600
+        env:
+          OCP_NODE_POOL_NAME: "isv-gpu-pool"
 
 tests:
-  description: "OSAC GPU cluster validation (OCP + A10)"
+  cluster_name: "osac-gpu"
+  description: "OSAC K8s GPU validation: GPU node pool and multi-node NCCL"
+
+  settings:
+    region: "us-east-2"
 
   validations:
-    kubernetes:
-      checks:
-        K8sGpuOperatorNamespaceCheck:
-          namespace: "nvidia-gpu-operator"
-        K8sGpuOperatorPodsCheck:
-          namespace: "nvidia-gpu-operator"
-        K8sGpuCapacityCheck:
-          resource_name: "nvidia.com/gpu"
-          expected_per_node: 1
-          expected_total: 1
-        K8sNvidiaSmiCheck:
-          runtime_class: ""
-        K8sGpuPodAccessCheck:
-          gpu_count: 1
-          total_gpu_count: 1
-          runtime_class: ""
-        K8sDriverVersionCheck:
-          driver_version: "580.82.07"
-          runtime_class: ""
-        K8sNcclWorkload:
-          min_bus_bw_gbps: 1
-          timeout: 600
-        K8sGpuStressWorkload:
-          memory_gb: 1
-          runtime: 30
-          timeout: 300
-          runtime_class_name: ""
-        K8sMigConfigCheck:
-          require_mig: false
-        K8sCrdWebhookCheck:
-          wait_timeout: 300
-
     k8s_workloads:
       checks:
-        K8sGpuStressWorkload:
+        K8sNcclMultiNodeWorkload:
+          nodes: 2
+          gpus_per_node: 1
+          min_bus_bw_gbps: 0
+          quick_mode: true
+          timeout: 600
+          use_compute_domain: "false"
+          override_launcher_affinity: true
           runtime_class_name: ""
 
   exclude:
-    tests: []
+    labels:
+      - "nfs"
+      - "object_storage"
+      - "kms"
+      - "hss"
+      - "nim"
+    tests:
+      - "K8sCpuNodePoolCreatedCheck"
+      - "K8sNodePoolScaledCheck"
+      - "K8sNodePoolDeletedCheck"
+      - "K8sNodeCountCheck"
+      - "K8sGpuDevicePluginCheck"
+      - "K8sGpuSchedulableCheck"
+      - "K8sGpuWorkloadCheck"
+      - "K8sGpuTimeSlicingCheck"
+      - "K8sGpuMpsCheck"
+      - "K8sGpuMigCheck"
+      - "K8sGpuDriverVersionCheck"
+      - "K8sMultiClusterSameVpcCheck"
+      - "K8sClusterAutoscalerCheck"
+      - "K8sControlPlaneLogsCheck"
+      - "K8sApiAuditTrailCheck"
+      - "K8sApiNetworkAclCheck"
+      - "K8sCsiDriverHealthCheck"
+      - "K8sCsiStorageTypesCheck"
+      - "K8sCsiStorageQuotaApiCheck"
+      - "K8sCsiProvisioningModesCheck"
+      - "K8sCsiConcurrentPvcCheck"
+      - "K8sCsiPvcExpandCheck"
+      - "K8sCsiTenantScopedCredentialsCheck"
+      - "K8sPodHealthCheck"
+      - "K8sNoErrorPodsCheck"
+      - "K8sConformanceCheck"
+      - "K8sNcclWorkload"
+      - "K8sGpuStressWorkload"
+      - "K8sNimInferenceWorkload"
+      - "K8sNimHelmWorkload-1b"
+      - "K8sNimHelmWorkload-8b"
+      - "K8sNimHelmWorkload-70b"

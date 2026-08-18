@@ -16,12 +16,13 @@
 
 """Launch a VM from a custom container disk image via OpenShift Virtualization.
 
-Uses a containerDisk source (customer-packaged OS image as a container
-image) to boot a VirtualMachine. This is the CNV-native way to use
-custom images without requiring large persistent storage for the clone.
+Uses a containerDisk source to boot a VirtualMachine with cloud-init SSH
+key injection. Exposes SSH via a NodePort Service so the test runner on
+the hypervisor can reach the VM.
 
-Outputs JSON consumed by VmBootedFromCustomImageCheck (BOOT01-05):
-  success, instance_id, public_ip, key_path, state, key_name
+Outputs JSON consumed by VmBootedFromCustomImageCheck and
+VmFromCustomImageReadyCheck:
+  success, instance_id, public_ip, key_path, state, ssh_port, ssh_user
 """
 
 from __future__ import annotations
@@ -71,10 +72,11 @@ def ensure_namespace(ns: str) -> bool:
 
 def create_vm_manifest(
     vm_name: str, namespace: str, container_image: str,
-    ssh_pub_key: str,
+    ssh_pub_key: str, ssh_user: str,
 ) -> dict:
     cloud_init = (
         "#cloud-config\n"
+        f"user: {ssh_user}\n"
         "ssh_authorized_keys:\n"
         f"  - {ssh_pub_key}\n"
     )
@@ -122,6 +124,22 @@ def create_vm_manifest(
     }
 
 
+def create_nodeport_service(vm_name: str, namespace: str) -> dict:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": f"{vm_name}-ssh",
+            "namespace": namespace,
+        },
+        "spec": {
+            "type": "NodePort",
+            "selector": {"vm.kubevirt.io/name": vm_name},
+            "ports": [{"port": 22, "targetPort": 22, "protocol": "TCP"}],
+        },
+    }
+
+
 def wait_vm_running(vm_name: str, namespace: str) -> tuple[bool, str]:
     deadline = time.time() + POLL_TIMEOUT
     last_status = ""
@@ -138,19 +156,39 @@ def wait_vm_running(vm_name: str, namespace: str) -> tuple[bool, str]:
     return False, last_status
 
 
-def get_vmi_ip(vm_name: str, namespace: str) -> str:
+def get_node_ip_and_nodeport(vm_name: str, namespace: str) -> tuple[str, int]:
     rc, out, _ = run_kubectl(
-        "get", "vmi", vm_name, "-n", namespace,
-        "-o", "jsonpath={.status.interfaces[0].ipAddress}",
+        "get", "svc", f"{vm_name}-ssh", "-n", namespace,
+        "-o", "jsonpath={.spec.ports[0].nodePort}",
     )
-    if rc == 0 and out:
-        return out
+    nodeport = int(out) if rc == 0 and out.isdigit() else 0
+
     rc, out, _ = run_kubectl(
-        "get", "pod", "-n", namespace,
-        "-l", f"vm.kubevirt.io/name={vm_name}",
-        "-o", "jsonpath={.items[0].status.podIP}",
+        "get", "nodes", "-l", "node-role.kubernetes.io/worker",
+        "-o", "jsonpath={.items[0].status.addresses[?(@.type==\"InternalIP\")].address}",
     )
-    return out if rc == 0 else ""
+    node_ip = out if rc == 0 and out else ""
+    return node_ip, nodeport
+
+
+def wait_ssh_ready(
+    host: str, port: int, user: str, key_path: str, timeout: int = 180,
+) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            proc = subprocess.run(
+                ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                 "-o", "BatchMode=yes", "-i", key_path,
+                 "-p", str(port), f"{user}@{host}", "echo SSH_OK"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if proc.returncode == 0 and "SSH_OK" in proc.stdout:
+                return True
+        except Exception:
+            pass
+        time.sleep(5)
+    return False
 
 
 def main() -> int:
@@ -158,6 +196,7 @@ def main() -> int:
     parser.add_argument("--namespace", default="isv-image-test")
     parser.add_argument("--vm-name", default="isv-custom-image-vm")
     parser.add_argument("--container-image", default="quay.io/containerdisks/fedora:latest")
+    parser.add_argument("--ssh-user", default="fedora")
     args = parser.parse_args()
 
     result: dict = {
@@ -169,6 +208,8 @@ def main() -> int:
         "key_path": "",
         "key_name": "",
         "state": "",
+        "ssh_port": 22,
+        "ssh_user": args.ssh_user,
     }
 
     if DEMO_MODE:
@@ -201,7 +242,8 @@ def main() -> int:
         sys.stderr.write(f"Using container disk image: {args.container_image}\n")
 
         manifest = create_vm_manifest(
-            args.vm_name, args.namespace, args.container_image, ssh_pub_key,
+            args.vm_name, args.namespace, args.container_image,
+            ssh_pub_key, args.ssh_user,
         )
 
         rc, _, _ = run_kubectl("get", "vm", args.vm_name, "-n", args.namespace)
@@ -209,6 +251,8 @@ def main() -> int:
             sys.stderr.write(f"VM {args.vm_name} already exists, deleting...\n")
             run_kubectl("delete", "vm", args.vm_name, "-n", args.namespace,
                         "--wait=true", timeout=120)
+            run_kubectl("delete", "svc", f"{args.vm_name}-ssh", "-n", args.namespace,
+                        "--ignore-not-found=true", timeout=30)
             time.sleep(5)
 
         manifest_path = os.path.join(key_dir, "vm.json")
@@ -222,6 +266,15 @@ def main() -> int:
             return 1
 
         result["instance_id"] = args.vm_name
+
+        svc_manifest = create_nodeport_service(args.vm_name, args.namespace)
+        svc_path = os.path.join(key_dir, "svc.json")
+        with open(svc_path, "w") as f:
+            json.dump(svc_manifest, f)
+        rc, _, err = run_kubectl("apply", "-f", svc_path)
+        if rc != 0:
+            sys.stderr.write(f"Warning: failed to create NodePort service: {err}\n")
+
         sys.stderr.write(f"VM {args.vm_name} created, waiting for Running...\n")
 
         running, phase = wait_vm_running(args.vm_name, args.namespace)
@@ -231,8 +284,23 @@ def main() -> int:
             print(json.dumps(result, indent=2))
             return 1
 
-        ip = get_vmi_ip(args.vm_name, args.namespace)
-        result["public_ip"] = ip or "unknown"
+        node_ip, nodeport = get_node_ip_and_nodeport(args.vm_name, args.namespace)
+        if not node_ip or not nodeport:
+            result["error"] = "Could not determine NodePort access"
+            print(json.dumps(result, indent=2))
+            return 1
+
+        result["public_ip"] = node_ip
+        result["ssh_port"] = nodeport
+        sys.stderr.write(f"VM accessible at {node_ip}:{nodeport}\n")
+        sys.stderr.write("Waiting for SSH to become ready...\n")
+        ssh_ok = wait_ssh_ready(node_ip, nodeport, args.ssh_user, key_path)
+        if not ssh_ok:
+            result["state"] = "running"
+            result["error"] = f"SSH did not become ready within timeout at {node_ip}:{nodeport}"
+            print(json.dumps(result, indent=2))
+            return 1
+
         result["state"] = "running"
         result["success"] = True
 

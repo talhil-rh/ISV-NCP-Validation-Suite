@@ -51,9 +51,10 @@ def _get_coredns_ip() -> str | None:
     for ns, svc in [("openshift-dns", "dns-default"), ("kube-system", "kube-dns")]:
         try:
             r = subprocess.run(
-                [kubectl, "get", "svc", svc, "-n", ns,
-                 "-o", "jsonpath={.spec.clusterIP}"],
-                capture_output=True, text=True, timeout=10,
+                [kubectl, "get", "svc", svc, "-n", ns, "-o", "jsonpath={.spec.clusterIP}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if r.returncode == 0 and r.stdout.strip():
                 return r.stdout.strip()
@@ -78,15 +79,17 @@ def main() -> int:
     }
 
     if DEMO_MODE:
-        result.update({
-            "success": True,
-            "cidr": "10.200.0.0/16",
-            "subnets": [
-                {"cidr": "10.200.0.0/24"},
-                {"cidr": "10.200.1.0/24"},
-            ],
-            "dhcp_options": {"domain_name_servers": ["172.30.0.10"]},
-        })
+        result.update(
+            {
+                "success": True,
+                "cidr": "10.200.0.0/16",
+                "subnets": [
+                    {"cidr": "10.200.0.0/24"},
+                    {"cidr": "10.200.1.0/24"},
+                ],
+                "dhcp_options": {"domain_name_servers": ["172.30.0.10"]},
+            }
+        )
         print(json.dumps(result, indent=2))
         return 0
 

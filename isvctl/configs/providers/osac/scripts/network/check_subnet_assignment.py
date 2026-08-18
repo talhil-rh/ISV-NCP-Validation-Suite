@@ -51,12 +51,14 @@ def main() -> int:
     }
 
     if DEMO_MODE:
-        result.update({
-            "success": True,
-            "subnets": [{"subnet_id": "isv-sub-demo", "cidr": "10.200.0.0/24"}],
-            "subnet_count": 1,
-            "tests": {"subnet_assigned": {"passed": True}},
-        })
+        result.update(
+            {
+                "success": True,
+                "subnets": [{"subnet_id": "isv-sub-demo", "cidr": "10.200.0.0/24"}],
+                "subnet_count": 1,
+                "tests": {"subnet_assigned": {"passed": True}},
+            }
+        )
         print(json.dumps(result, indent=2))
         return 0
 
@@ -87,8 +89,9 @@ def main() -> int:
         assigned = len(subnets) > 0
         result["tests"]["subnet_assigned"] = {
             "passed": assigned,
-            "message": f"{len(subnets)} subnet(s) found in VNet {args.vnet_id}" if assigned
-                       else f"No subnets found in VNet {args.vnet_id}",
+            "message": f"{len(subnets)} subnet(s) found in VNet {args.vnet_id}"
+            if assigned
+            else f"No subnets found in VNet {args.vnet_id}",
         }
         result["success"] = assigned
 

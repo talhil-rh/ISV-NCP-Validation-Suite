@@ -122,9 +122,18 @@ def main() -> int:
 
         # 1. Look up the BMI CRD by label to find the backing BareMetalHost
         r = subprocess.run(
-            [kubectl, "get", "baremetalinstance", "-n", operator_ns, f"-l={label}",
-             "-o=jsonpath={.items[0].spec.externalHostID}"],
-            capture_output=True, text=True, timeout=15,
+            [
+                kubectl,
+                "get",
+                "baremetalinstance",
+                "-n",
+                operator_ns,
+                f"-l={label}",
+                "-o=jsonpath={.items[0].spec.externalHostID}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         external_host_id = r.stdout.strip() if r.returncode == 0 else ""
 

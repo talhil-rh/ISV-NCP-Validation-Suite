@@ -115,13 +115,23 @@ def main() -> int:
         wait_crd_ready("securitygroup", sg_a_id, crd_ns, label="osac.openshift.io/securitygroup-uuid")
 
         s, b = client.update_security_group(
-            sg_a_id, "spec.ingress",
-            {"spec": {"virtual_network": {"id": vnet_id}, "ingress": [
-                {"protocol": "PROTOCOL_TCP", "port_from": ALLOWED_PORT, "port_to": ALLOWED_PORT, "ipv4_cidr": "0.0.0.0/0"},
-            ]}},
+            sg_a_id,
+            "spec.ingress",
+            {
+                "spec": {
+                    "virtual_network": {"id": vnet_id},
+                    "ingress": [
+                        {
+                            "protocol": "PROTOCOL_TCP",
+                            "port_from": ALLOWED_PORT,
+                            "port_to": ALLOWED_PORT,
+                            "ipv4_cidr": "0.0.0.0/0",
+                        },
+                    ],
+                }
+            },
         )
-        result["tests"]["apply_port_policy"] = {"passed": s == 200,
-                                                  **({"error": f"HTTP {s}"} if s != 200 else {})}
+        result["tests"]["apply_port_policy"] = {"passed": s == 200, **({"error": f"HTTP {s}"} if s != 200 else {})}
 
         # SG-B: no rules
         s, b = client.create_security_group(f"isv-sg-psp-b-{suffix}", vnet_id)
@@ -170,11 +180,13 @@ def main() -> int:
             ct, _ = create_sa_token(args.tenant_namespace, "default")
             cc = FulfillmentClient(config, ct)
             cleanup_ok = True
-            for res_id, deleter in [(sg_a_id, cc.delete_security_group),
-                                     (sg_b_id, cc.delete_security_group),
-                                     (sub_a_id, cc.delete_subnet),
-                                     (sub_b_id, cc.delete_subnet),
-                                     (vnet_id, cc.delete_virtual_network)]:
+            for res_id, deleter in [
+                (sg_a_id, cc.delete_security_group),
+                (sg_b_id, cc.delete_security_group),
+                (sub_a_id, cc.delete_subnet),
+                (sub_b_id, cc.delete_subnet),
+                (vnet_id, cc.delete_virtual_network),
+            ]:
                 if res_id:
                     s, _ = deleter(res_id)
                     if s not in (200, 204, 404):

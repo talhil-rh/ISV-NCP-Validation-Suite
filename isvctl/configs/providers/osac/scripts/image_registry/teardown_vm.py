@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Clean up VM and namespace created by launch_custom_image_vm.py."""
+"""Clean up VM, Service, and namespace created by launch_custom_image_vm.py."""
 
 from __future__ import annotations
 
@@ -57,6 +57,13 @@ def main() -> int:
         result["success"] = True
         print(json.dumps(result, indent=2))
         return 0
+
+    rc, _, err = run_kubectl(
+        "delete", "svc", f"{args.vm_name}-ssh", "-n", args.namespace,
+        "--ignore-not-found=true",
+    )
+    if rc != 0:
+        result["cleanup_errors"].append(f"Service delete: {err}")
 
     rc, _, err = run_kubectl(
         "delete", "vm", args.vm_name, "-n", args.namespace,

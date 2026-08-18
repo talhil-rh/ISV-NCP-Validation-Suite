@@ -25,8 +25,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -34,7 +32,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.osac_client import FulfillmentClient, create_sa_token, get_admin_token, get_env_config, wait_crd_ready
+from common.osac_client import FulfillmentClient, create_sa_token, get_env_config, wait_crd_ready
 
 DEMO_MODE = os.environ.get("ISVCTL_DEMO_MODE") == "1"
 
@@ -94,56 +92,11 @@ def main() -> int:
             print(json.dumps(result, indent=2))
             return 1
         vnet_id = body["id"]
-        # network_class is returned as a nested {id: <uuid>} object in the current API
-        nc_obj = body.get("spec", {}).get("network_class", {})
-        nc_id = (nc_obj.get("id") if isinstance(nc_obj, dict) else nc_obj) or network_class
-
-        # implementationStrategy is required by the operator and not returned by
-        # the public REST API. Read it from the private fulfillment API using the
-        # admin token, which has access to NetworkClass details.
-        impl_strategy = ""
-        try:
-            admin_token = get_admin_token(config)
-            admin_client = FulfillmentClient(config, admin_token)
-            nc_status, nc_body = admin_client._private_request(f"/api/private/v1/network_classes/{nc_id}", admin_token)
-            if nc_status == 200:
-                impl_strategy = nc_body.get("implementation_strategy", "")
-        except Exception:
-            pass
 
         crd_ns = config.tenant_namespace
-        kubectl = shutil.which("kubectl") or shutil.which("oc") or "kubectl"
-
-        vnet_spec: dict = {"region": args.region, "ipv4Cidr": cidr, "networkClass": nc_id}
-        if impl_strategy:
-            vnet_spec["implementationStrategy"] = impl_strategy
-
-        # The osac-operator reconciles existing K8s CRDs but does not auto-create
-        # them from fulfillment REST API events. Create the CRD with the fulfillment
-        # UUID label and implementationStrategy so the operator can provision it.
-        subprocess.run(
-            [kubectl, "apply", "-f", "-"],
-            input=json.dumps(
-                {
-                    "apiVersion": "osac.openshift.io/v1alpha1",
-                    "kind": "VirtualNetwork",
-                    "metadata": {
-                        "name": vnet_name,
-                        "namespace": crd_ns,
-                        "labels": {
-                            "osac.openshift.io/virtualnetwork-uuid": vnet_id,
-                            "osac.openshift.io/tenant": args.tenant_namespace,
-                        },
-                    },
-                    "spec": vnet_spec,
-                }
-            ),
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
-
-        wait_crd_ready("virtualnetwork", vnet_id, crd_ns, label="osac.openshift.io/virtualnetwork-uuid")
+        # The fulfillment-controller auto-creates the VirtualNetwork CRD when the
+        # REST resource is created; wait for the operator to reconcile it to Ready.
+        wait_crd_ready("virtualnetwork", vnet_id, crd_ns, label="osac.openshift.io/virtualnetwork-uuid", timeout=300)
 
         # The fulfillment service VNet state is updated asynchronously by the
         # feedback controller after the K8s CRD reaches Ready. Poll until the
@@ -169,33 +122,7 @@ def main() -> int:
                 print(json.dumps(result, indent=2))
                 return 1
             sub_id = s_body["id"]
-
-            subprocess.run(
-                [kubectl, "apply", "-f", "-"],
-                input=json.dumps(
-                    {
-                        "apiVersion": "osac.openshift.io/v1alpha1",
-                        "kind": "Subnet",
-                        "metadata": {
-                            "name": sub_name,
-                            "namespace": crd_ns,
-                            "labels": {
-                                "osac.openshift.io/subnet-uuid": sub_id,
-                                "osac.openshift.io/virtualnetwork-uuid": vnet_id,
-                                "osac.openshift.io/tenant": args.tenant_namespace,
-                            },
-                        },
-                        "spec": {
-                            "virtualNetwork": vnet_id,
-                            "ipv4Cidr": sub_cidr,
-                        },
-                    }
-                ),
-                text=True,
-                capture_output=True,
-                timeout=30,
-            )
-
+            # The fulfillment-controller auto-creates the Subnet CRD; wait for Ready.
             wait_crd_ready("subnet", sub_id, crd_ns, label="osac.openshift.io/subnet-uuid")
             subnet_ids.append(sub_id)
             result["subnets"].append({"subnet_id": sub_id, "cidr": sub_cidr})

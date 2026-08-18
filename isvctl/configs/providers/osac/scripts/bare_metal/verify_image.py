@@ -107,9 +107,18 @@ def main() -> int:
         kubectl = shutil.which("kubectl") or shutil.which("oc") or "oc"
         label = f"osac.openshift.io/baremetalinstance-uuid={args.instance_id}"
         r = subprocess.run(
-            [kubectl, "get", "baremetalinstance", "-n", config.tenant_namespace,
-             f"-l={label}", "-o=jsonpath={.items[0].spec.externalHostID}"],
-            capture_output=True, text=True, timeout=15,
+            [
+                kubectl,
+                "get",
+                "baremetalinstance",
+                "-n",
+                config.tenant_namespace,
+                f"-l={label}",
+                "-o=jsonpath={.items[0].spec.externalHostID}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         external_host_id = r.stdout.strip() if r.returncode == 0 else ""
 

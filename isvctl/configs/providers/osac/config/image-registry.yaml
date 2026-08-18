@@ -15,13 +15,16 @@
 
 # OSAC Image Registry Validation Configuration
 #
-# Launches a VM from a golden image (DataImportCron) via OpenShift
-# Virtualization (CNV). Only the launch_instance step is wired;
-# other image-registry checks (CRUD, upload, BMaaS) skip as
-# step_not_configured.
+# Launches a VM from a container disk image via OpenShift Virtualization
+# (CNV), then verifies SSH connectivity and OS detection.
 #
 # Implemented checks:
-#   BOOT01-05: VmBootedFromCustomImageCheck (VM from custom image reaches running)
+#   BOOT01-05: VmBootedFromCustomImageCheck — VM from custom image reaches running
+#   VmFromCustomImageReadyCheck — VM answers SSH and reports expected OS
+#   BOOT01-02: OsInstallConfigCrudCheck — ConfigMap-based install config CRUD
+#   BOOT01-03: BmHostBootedFromCustomImageCheck — BMI from custom image (bare_metal)
+#
+# Requires: OpenShift Virtualization (CNV) operator installed.
 #
 # Usage:
 #   KUBECONFIG=/path/to/kubeconfig \
@@ -47,6 +50,8 @@ commands:
           - "isv-custom-image-vm"
           - "--container-image"
           - "quay.io/containerdisks/fedora:latest"
+          - "--ssh-user"
+          - "fedora"
         timeout: 600
 
       - name: teardown_instance
@@ -59,14 +64,45 @@ commands:
           - "isv-custom-image-vm"
         timeout: 120
 
+      - name: crud_install_config
+        phase: test
+        command: "python3 ../scripts/image_registry/crud_install_config.py"
+        timeout: 120
+        continue_on_failure: true
+
+      - name: install_image_bm
+        phase: test
+        requires: [bare_metal]
+        command: "python3 ../scripts/image_registry/install_image_bm.py"
+        args:
+          - "--image-id"
+          - "{{steps.upload_image.image_id}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+        timeout: 1800
+
 tests:
   cluster_name: "osac-image-registry"
-  description: "OSAC image registry: VM from custom image via CNV"
+  description: "OSAC image registry: VM from custom image via CNV with SSH verification"
 
   settings:
     region: "osac-default"
+    expected_os: "fedora"
+    user: "fedora"
+
+  validations:
+    vm_ssh:
+      step: launch_instance
+      checks:
+        VmFromCustomImageReadyCheck:
+          test_id: "N/A"
+          labels: ["image_registry", "ssh"]
+          requires: [vm]
+          description: "Check the VM booted from the custom image answers SSH and reports the expected OS"
+          compose:
+            - ConnectivityCheck
+            - OsCheck:
+                expected_os: "fedora"
 
   exclude:
-    labels:
-      - "ssh"
-      - "bare_metal"
+    labels: []

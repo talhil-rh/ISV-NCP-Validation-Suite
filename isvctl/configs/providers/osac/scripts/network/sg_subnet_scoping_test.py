@@ -116,23 +116,32 @@ def main() -> int:
 
         # Apply rule for subnet A only
         s, b = client.update_security_group(
-            sg_id, "spec.ingress",
-            {"spec": {"virtual_network": {"id": vnet_id}, "ingress": [
-                {"protocol": "PROTOCOL_TCP", "port_from": 443, "port_to": 443, "ipv4_cidr": SUBNET_A_CIDR},
-            ]}},
+            sg_id,
+            "spec.ingress",
+            {
+                "spec": {
+                    "virtual_network": {"id": vnet_id},
+                    "ingress": [
+                        {"protocol": "PROTOCOL_TCP", "port_from": 443, "port_to": 443, "ipv4_cidr": SUBNET_A_CIDR},
+                    ],
+                }
+            },
         )
-        result["tests"]["apply_subnet_rule"] = {"passed": s == 200,
-                                                  **({"error": f"HTTP {s}"} if s != 200 else {})}
+        result["tests"]["apply_subnet_rule"] = {"passed": s == 200, **({"error": f"HTTP {s}"} if s != 200 else {})}
 
         s, b = client.get_security_group(sg_id)
         if s == 200:
             cidrs = _ingress_cidrs(b)
             allowed = SUBNET_A_CIDR in cidrs
-            result["tests"]["subnet_allowed"] = {"passed": allowed,
-                                                   **({"error": f"{SUBNET_A_CIDR} not in rules"} if not allowed else {})}
+            result["tests"]["subnet_allowed"] = {
+                "passed": allowed,
+                **({"error": f"{SUBNET_A_CIDR} not in rules"} if not allowed else {}),
+            }
             blocked = SUBNET_B_CIDR not in cidrs
-            result["tests"]["other_subnet_blocked"] = {"passed": blocked,
-                                                         **({"error": f"{SUBNET_B_CIDR} unexpectedly in rules"} if not blocked else {})}
+            result["tests"]["other_subnet_blocked"] = {
+                "passed": blocked,
+                **({"error": f"{SUBNET_B_CIDR} unexpectedly in rules"} if not blocked else {}),
+            }
         else:
             result["tests"]["subnet_allowed"]["error"] = f"GET SG HTTP {s}"
             result["tests"]["other_subnet_blocked"]["error"] = f"GET SG HTTP {s}"
@@ -145,10 +154,12 @@ def main() -> int:
             ct, _ = create_sa_token(args.tenant_namespace, "default")
             cc = FulfillmentClient(config, ct)
             cleanup_ok = True
-            for res_id, deleter in [(sg_id, cc.delete_security_group),
-                                     (sub_a_id, cc.delete_subnet),
-                                     (sub_b_id, cc.delete_subnet),
-                                     (vnet_id, cc.delete_virtual_network)]:
+            for res_id, deleter in [
+                (sg_id, cc.delete_security_group),
+                (sub_a_id, cc.delete_subnet),
+                (sub_b_id, cc.delete_subnet),
+                (vnet_id, cc.delete_virtual_network),
+            ]:
                 if res_id:
                     s, _ = deleter(res_id)
                     if s not in (200, 204, 404):

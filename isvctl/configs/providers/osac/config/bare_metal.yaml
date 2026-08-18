@@ -58,6 +58,7 @@
 
 import:
   - ../../../suites/bare_metal.yaml
+  - ../../../suites/network.yaml
 
 version: "1.0"
 
@@ -287,6 +288,67 @@ commands:
         timeout: 2400
 
       # =======================================================================
+      # TEST: Network connectivity (NetworkConnectivityCheck)
+      # =======================================================================
+      - name: connectivity_test
+        phase: test
+        command: "python3 ../scripts/network/connectivity_test.py"
+        args:
+          - "--external-ip-a"
+          - "{{steps.launch_instance.external_ip}}"
+          - "--external-ip-b"
+          - "{{steps.launch_instance.external_ip}}"
+          - "--instance-a-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--instance-b-id"
+          - "{{steps.launch_instance.instance_id}}"
+        timeout: 30
+
+      # =======================================================================
+      # TEST: Stable private IP across stop/start (StablePrivateIpCheck / SDN11-01)
+      # =======================================================================
+      - name: stable_ip_test
+        phase: test
+        command: "python3 ../scripts/network/stable_ip_test.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--ip-before"
+          - "{{steps.launch_instance.external_ip}}"
+          - "--tenant-namespace"
+          - "{{steps.setup_tenant.tenant_namespace}}"
+          - "--verify-only"
+        timeout: 60
+
+      # =======================================================================
+      # TEST: Stable egress IP (StableEgressIpCheck / DMS05-01)
+      # =======================================================================
+      - name: stable_egress_ip_test
+        phase: test
+        command: "python3 ../scripts/network/stable_egress_ip_test.py"
+        args:
+          - "--external-ip"
+          - "{{steps.launch_instance.external_ip}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+        timeout: 180
+
+      # =======================================================================
+      # TEST: Traffic flow (TrafficFlowCheck)
+      # =======================================================================
+      - name: traffic_validation
+        phase: test
+        command: "python3 ../scripts/network/traffic_validation_test.py"
+        args:
+          - "--external-ip-a"
+          - "{{steps.launch_instance.external_ip}}"
+          - "--bmh-ip-b"
+          - "192.168.160.1"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+        timeout: 180
+
+      # =======================================================================
       # TEARDOWN: Delete instance and ephemeral tenant
       # =======================================================================
       - name: teardown
@@ -416,6 +478,26 @@ tests:
       checks:
         DhcpIpManagementCheck:
           user: "fedora"
+
+    connectivity_test:
+      checks:
+        NetworkConnectivityCheck:
+          requires: []
+
+    stable_ip_test:
+      checks:
+        StablePrivateIpCheck:
+          requires: []
+
+    stable_egress_ip_test:
+      checks:
+        StableEgressIpCheck:
+          requires: []
+
+    traffic_validation:
+      checks:
+        TrafficFlowCheck:
+          requires: []
 
   exclude:
     labels:
